@@ -44,6 +44,7 @@ Movement tab (retunes the game's own movement profile, nothing is written into g
 
 Catcher tab (a catcher's own dash is the tackle, so these are the catcher versions of the dash tweaks):
 
+- **Both dashes**: "Catcher: also get the runner dash" gives catchers the runner dash on its own key (default LeftControl) next to the tackle key. Every dash tweak in the Movement tab applies to it.
 - **Auto Tackle**: dives at the closest runner once it is inside the chosen range (3 to 9 studs) and the game says the tackle is ready.
 - **Tackle aim**: nearest runner (leads a moving runner slightly), movement keys, camera or character facing; the character turns that way before diving.
 - **Tackle on a key**: LeftShift by default.

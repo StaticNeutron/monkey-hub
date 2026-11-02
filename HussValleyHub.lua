@@ -304,9 +304,11 @@ local function tuneProfile(profile)
 	end
 
 	local dash = profile.Dash
-	local dashAvailable = type(dash) == "table" and dash.Enabled
+	local dashAvailable = type(dash) == "table" and (dash.Enabled or tuning.catcherDash)
 	if dashAvailable then
 		local tuned = table.clone(dash)
+		-- Catchers ship with the runner dash disabled; "Catcher: also get the runner dash" switches it on for them.
+		if not dash.Enabled then tuned.Enabled = true end
 		if tuning.noCooldown then
 			tuned.Cooldown = math.min(dash.Cooldown, tuning.gap)
 			if tuning.skipRecovery then tuned.RecoveryDuration = 0 end
@@ -805,6 +807,15 @@ local function requestCatcherDash()
 	fireTackle()
 end
 
+-- The runner dash for catchers (the second dash). Needs "Catcher: also get the runner dash"; every dash tweak in the
+-- Movement tab (cooldown, distance, speed, direction, anytime) applies to it.
+local function requestCatcherRunnerDash()
+	if not (movement.catcherDash and boostInput and catcherActive()) then return end
+
+	boostInput.request()
+	setthreadidentity(8)
+end
+
 -- Auto Tackle: dive at the closest runner once it is inside the chosen range and the game says the tackle is ready.
 ---@param context table
 local function autoTackle(context)
@@ -956,7 +967,7 @@ end
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
 	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
-	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "tackleNoCooldown", "reachAssist", "speed", "immortalTweaks" } do
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist", "speed", "immortalTweaks" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -993,11 +1004,11 @@ local function watchServerSnapBack(character)
 	if lastRunStateAt > resetAt - 2.5 or os.clock() - lastRunStateAt < 3 then return end
 
 	local forced = movement.immortal and movement.immortalTweaks
-	if not (movement.fastDash or forced or movement.instantAccel or movement.freeDash or movement.dashAnytime or tackle.noCooldown or tackle.reachAssist) then return end
+	if not (movement.fastDash or forced or movement.instantAccel or movement.freeDash or movement.dashAnytime or movement.catcherDash or tackle.noCooldown or tackle.reachAssist) then return end
 
 	-- No dash-time knob in play: the snap-back can only come from the acceleration or catcher-dash switches, so withdraw them.
 	if not (movement.fastDash or forced) then
-		for _, name in { "instantAccel", "freeDash", "dashAnytime", "tackleNoCooldown", "reachAssist" } do
+		for _, name in { "instantAccel", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist" } do
 			local entry = ui and ui.Flags[name]
 			if entry and entry.Value == true then entry.Set(false) end
 		end
@@ -1242,6 +1253,9 @@ local function buildUi()
 	catch:AddDropdown({ Text = "Tackle aim", Options = { "Nearest runner", "Movement keys", "Camera", "Character facing" }, Default = "Nearest runner", Flag = "tackleAim", Callback = function(value) tackle.aim = value end })
 	catch:AddToggle({ Text = "Tackle on a key (the catcher's dash)", Default = false, Flag = "catcherDash", Callback = function(on) tackle.key = on end })
 	catch:AddKeybind({ Text = "Tackle key", Default = Enum.KeyCode.LeftShift, Flag = "catcherDashKey", Pressed = function() requestCatcherDash() end })
+	catch:AddToggle({ Text = "Catcher: also get the runner dash (both dashes)", Default = false, Flag = "catcherRunnerDash", Callback = function(on) movement.catcherDash = on end })
+	catch:AddKeybind({ Text = "Runner dash key", Default = Enum.KeyCode.LeftControl, Flag = "catcherRunnerDashKey", Pressed = function() requestCatcherRunnerDash() end })
+	catch:AddLabel("Catchers normally only have the tackle. This also gives them the runner dash on its own key, so you can tackle with one key and dash with the other. Every dash tweak in the Movement tab (no cooldown, longer, faster, free direction, dash anytime, instant acceleration) applies to it. Hold a direction and press the key; without free-direction dash the game wants a turn of at least 35 degrees away from where you are running.")
 	catch:AddToggle({ Text = "No tackle cooldown", Default = false, Flag = "tackleNoCooldown", Callback = function(on) tackle.noCooldown = on end })
 	catch:AddLabel("A catcher's own dash is the tackle, so these are the catcher versions of the runner dash tweaks. The key and Auto Tackle turn you toward the chosen aim first, then dive; the game's own readiness checks still apply. The server keeps its own tackle timer, so No tackle cooldown may be refused or snap you back, and the hub then switches it off by itself.")
 	catch:AddSection("Hitbox")
