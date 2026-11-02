@@ -27,6 +27,8 @@ Auto Dodge (dashes out of catcher swings and tackles through the game's own dash
 
 **Configs** (Settings tab): pick a slot (Config 1 to 5) and Save, Load or Delete it. A config stores every switch, slider, dropdown and keybind in `HussValley/configs/` in your executor workspace. "Load this config when the script starts" restores the chosen slot every time you run the script.
 
+**Proximity dodge** (Combat tab): also dashes away from any live catcher that gets within the chosen range (4 to 14 studs), before it even starts a swing, using the same landing-spot picker as Auto Dodge. An "Auto Dodge on/off key" (G by default) toggles Auto Dodge in game.
+
 Movement tab (retunes the game's own movement profile, nothing is written into game memory):
 
 - **No dash cooldown** (with an optional cooldown cap and "skip recovery"): a dash every ~0.3 s instead of every ~0.7 s. Auto Dodge re-arms right after each dash.

@@ -633,6 +633,20 @@ local function scanThreats(position)
 			end
 		end
 
+		-- Proximity dodge: any live catcher inside the chosen range counts as a threat from every side, so the dash
+		-- leaves before the swing even starts. Closer catchers get a tighter trigger.
+		if flag("proximity") then
+			local toUs = flat(position - origin)
+			local range = numberFlag("proximityRange", 8) + extra
+			if toUs.Magnitude <= range then
+				local dir = toUs.Magnitude > 0.01 and toUs.Unit or Vector3.new(1, 0, 0)
+				table.insert(threats, {
+					kind = "Proximity", catcher = participant.Name, origin = origin, dir = dir,
+					limit = range, behind = range, half = range, slack = 0,
+				})
+			end
+		end
+
 		-- A catcher locked on to us and close enough to swing next.
 		if (flag("early") or immortal) and phase == "Tracking" and character:GetAttribute("ReachTargetUserId") == localPlayer.UserId then
 			local toUs = flat(position - origin)
@@ -871,7 +885,7 @@ local function react(context)
 	for _, threat in threats do
 		if safety(threat, position) <= 0 then
 			inside = true
-			if threat.kind ~= "Tracking" then committed = true end
+			if threat.kind ~= "Tracking" and threat.kind ~= "Proximity" then committed = true end
 		end
 	end
 
@@ -1207,6 +1221,12 @@ local function buildUi()
 	combat:AddSection("Dodge")
 	combat:AddToggle({ Text = "Auto Dodge", Default = false, Flag = "autoDodge" })
 	combat:AddToggle({ Text = "Auto Ability (Q): runners when the dash is spent, catchers when a runner is close", Default = false, Flag = "autoAbility" })
+	combat:AddToggle({ Text = "Proximity dodge (dash away from any catcher that gets close)", Default = false, Flag = "proximity" })
+	combat:AddSlider({ Text = "Proximity range (studs)", Min = 4, Max = 14, Default = 8, Increment = 1, Flag = "proximityRange" })
+	combat:AddKeybind({ Text = "Auto Dodge on/off key", Default = Enum.KeyCode.G, Flag = "autoDodgeKey", Pressed = function()
+		local entry = ui.Flags.autoDodge
+		if entry then entry.Set(not entry.Value) end
+	end })
 	combat:AddToggle({ Text = "React to tracking catchers", Default = false, Flag = "early" })
 	combat:AddSlider({ Text = "Danger margin (studs)", Min = 0, Max = 4, Default = 0, Increment = 0.5, Flag = "margin" })
 	combat:AddSection("Immortal")
