@@ -36,9 +36,18 @@ Movement tab (retunes the game's own movement profile, nothing is written into g
 - **Free-direction dash**: dash wherever you point it without turning away first, and dash straight ahead while running that way (the game normally needs a turn of at least 35 degrees, so a forward dash or a dash from a standstill is refused). Use your normal dash key. "Dash toward": Movement keys (the keys you hold; camera forward if none), Camera, or Character facing. Auto Dodge / Immortal use it too, so they can dash in any direction with no priming.
 - **Instant acceleration**: reach top speed immediately instead of ramping up (runners go from about 0.6 s to 0.04 s to 30 studs/s; catchers already accelerate almost instantly).
 - **Speed boost**: 0 to 25 percent on top of the live top speed.
-- **Catcher: dash key uses the tackle**: a catcher's own dash is the tackle (Space / E / F in the game), not the runner dash. This binds it to the Catcher dash key (default LeftShift); the game's cooldown still applies. With free-direction dash on it turns you toward your chosen direction first. Auto Ability (Q) also fires for catchers when a runner is within 14 studs. ESP shows runners when you are a catcher.
+- **Catchers**: see the Catcher tab below.
 - **Snap-back protection**: if the server really snaps you back during a live match, the dash time is raised or instant acceleration / free dash are switched off. Resets around round ends, catches, safe, respawns and lobby teleports are ignored.
 - **Auto-off on a fair-play warning**: if the game's anti-cheat warns you, every movement tweak switches itself off.
+
+Catcher tab (a catcher's own dash is the tackle, so these are the catcher versions of the dash tweaks):
+
+- **Auto Tackle**: dives at the closest runner once it is inside the chosen range (3 to 9 studs) and the game says the tackle is ready.
+- **Tackle aim**: nearest runner (leads a moving runner slightly), movement keys, camera or character facing; the character turns that way before diving.
+- **Tackle on a key**: LeftShift by default.
+- **No tackle cooldown**: the client stops waiting for its own timer. The server keeps its own, so it may refuse early tackles; the hub switches it off if the server snaps you back.
+- **Reach assist (hitbox expander, experimental)**: catches are decided by the server, so the hitbox itself cannot be resized. This starts each tackle 0.5 to 2 studs further forward than you are (the server tolerates about 2.5 studs of position error). Untested against the server's hit rules.
+- Not included: a longer / faster / cancellable tackle, because the server checks the tackle's motion against its own numbers.
 
 The server watches movement; short tests of 2x dash rate, a 1.5x dash and +10% speed drew no warning, but pushing further raises the risk.
 

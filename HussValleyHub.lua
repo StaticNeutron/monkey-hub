@@ -84,6 +84,9 @@ local ui = nil
 local guiParent = nil
 local boostInput = nil
 local tacklePrediction = nil
+local originalRemaining = nil
+local lastTackle = 0
+local tackleHook = nil
 local participantDirectory = nil
 local lastDash = 0
 local lastAbility = 0
@@ -180,6 +183,29 @@ local movementProfiles = nil
 local originalGet = nil
 local dashAnimation = nil
 local originalPlay = nil
+-- Catcher tab settings. The tackle is the catcher's dash.
+local tackle = {
+	auto = false,
+	range = 5.5,
+	aim = "Nearest runner",
+	key = false,
+	noCooldown = false,
+	reachAssist = false,
+	reach = 1.5,
+}
+
+-- Replacement for TacklePrediction.remaining: with no tackle cooldown the client no longer waits for its own timer.
+---@return number
+local function tackleRemaining()
+	if tackle.noCooldown then return 0 end
+
+	return originalRemaining()
+end
+
+-- Keeps the position nudge applied to outgoing tackles in step with the Reach assist switch and slider.
+local function syncReach()
+	if tackleHook then tackleHook.reach = tackle.reachAssist and tackle.reach or 0 end
+end
 local movementModel = nil
 local originalStep = nil
 local profileCache = setmetatable({}, { __mode = "k" })
@@ -355,7 +381,8 @@ end
 -- Which way a free dash should go.
 ---@param moveDirection Vector3
 ---@return Vector3?
-local function chooseDashDirection(moveDirection)
+local function chooseDashDirection(moveDirection, mode)
+	mode = mode or movement.dashDirection
 	local keys = Vector3.new(moveDirection.X, 0, moveDirection.Z)
 
 	-- When the hub itself is steering (Auto Dodge / Immortal) the steered direction is already in moveDirection.
@@ -366,9 +393,9 @@ local function chooseDashDirection(moveDirection)
 	local cameraForward = Vector3.new(look.X, 0, look.Z)
 	cameraForward = cameraForward.Magnitude > 0.01 and cameraForward.Unit or nil
 
-	if movement.dashDirection == "Camera" then return cameraForward end
+	if mode == "Camera" then return cameraForward end
 
-	if movement.dashDirection == "Character facing" then
+	if mode == "Character facing" then
 		local root = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
 		local facing = root and Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
 		if facing and facing.Magnitude > 0.01 then return facing.Unit end
@@ -461,6 +488,10 @@ local function restoreMovement()
 	dashAnimation, originalPlay = nil, nil
 	if movementModel and movementModel.step == freeDashStep then swapFunction(movementModel, "step", originalStep) end
 	movementModel, originalStep = nil, nil
+	if tacklePrediction and originalRemaining and tacklePrediction.remaining == tackleRemaining then swapFunction(tacklePrediction, "remaining", originalRemaining) end
+	originalRemaining = nil
+	tackle.noCooldown, tackle.reachAssist, tackle.auto, tackle.key = false, false, false, false
+	syncReach()
 
 	movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
 	movement.skipAnimation, movement.immortal, movement.fullDash = false, false, false
@@ -707,27 +738,87 @@ local function dashReady(character, now)
 	return ready
 end
 
--- The catcher's own dash is the tackle (the game's Space / E / F). This fires it from the catcher dash key, facing the
--- chosen direction first when free-direction dash is on. The game still applies its own readiness and cooldown rules.
-local function requestCatcherDash()
-	if not (movement.catcherDash and tacklePrediction and catcherActive()) then return end
+-- Closest live runner to a point, as its root part and flat distance.
+---@param origin Vector3
+---@return BasePart?, number
+local function nearestRunner(origin)
+	local bestRoot, bestDistance = nil, math.huge
+	for _, participant in participants() do
+		if participant == localPlayer then continue end
+		if participant:GetAttribute("GameRole") ~= "Runner" or participant:GetAttribute("RunState") ~= "Active" then continue end
 
+		local character = participant.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if not (root and humanoid) or humanoid.Health <= 0 then continue end
+
+		local distance = flat(root.Position - origin).Magnitude
+		if distance < bestDistance then bestRoot, bestDistance = root, distance end
+	end
+
+	return bestRoot, bestDistance
+end
+
+-- Fires the catcher's own dash, the tackle, turned toward the chosen target first (the game dives along the way the
+-- character faces). The game still applies its own readiness checks.
+---@param aim string?
+---@return boolean
+local function fireTackle(aim)
+	if not (tacklePrediction and catcherActive()) then return false end
+
+	aim = aim or tackle.aim
+	local fired = false
 	pcall(function()
 		local character = localPlayer.Character
 		local root = character and character:FindFirstChild("HumanoidRootPart")
-		if not root then return end
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if not (root and humanoid) then return end
 
-		if movement.freeDash then
-			local humanoid = character:FindFirstChildOfClass("Humanoid")
-			local keys = humanoid and humanoid.MoveDirection or Vector3.zero
+		local direction = nil
+		if aim == "Nearest runner" then
+			local target = nearestRunner(root.Position)
+			if target then
+				-- Aim a little ahead of a moving runner.
+				local ahead = flat(target.Position + target.AssemblyLinearVelocity * 0.1 - root.Position)
+				if ahead.Magnitude > 0.1 then direction = ahead.Unit end
+			end
+		elseif aim ~= "Character facing" then
+			local keys = humanoid.MoveDirection
 			if hookState.steer ~= nil and os.clock() < hookState.expiresAt then keys = hookState.steer end
-			local direction = chooseDashDirection(keys)
-			if direction then root.CFrame = CFrame.lookAt(root.Position, root.Position + direction) end
+			direction = chooseDashDirection(keys, aim)
 		end
 
-		tacklePrediction.request()
+		if direction then root.CFrame = CFrame.lookAt(root.Position, root.Position + direction) end
+
+		fired = tacklePrediction.request() == true
 	end)
 	setthreadidentity(8)
+	lastTackle = os.clock()
+
+	return fired
+end
+
+-- Key press for the tackle: needs the Catcher key switch on.
+local function requestCatcherDash()
+	if not tackle.key then return end
+
+	fireTackle()
+end
+
+-- Auto Tackle: dive at the closest runner once it is inside the chosen range and the game says the tackle is ready.
+---@param context table
+local function autoTackle(context)
+	if not (tackle.auto and tacklePrediction) or os.clock() - lastTackle < 0.25 then return end
+	if context.character:GetAttribute("TackleActive") then return end
+
+	local target, distance = nearestRunner(context.root.Position)
+	if not target or distance > tackle.range then return end
+
+	local ready = tacklePrediction.remaining() <= 0.02
+	setthreadidentity(8)
+	if not ready then return end
+
+	fireTackle("Nearest runner")
 end
 
 -- Catcher counterpart of Auto Ability: spend the Q ability when a runner is within reach.
@@ -865,7 +956,7 @@ end
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
 	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
-	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "speed", "immortalTweaks" } do
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "tackleNoCooldown", "reachAssist", "speed", "immortalTweaks" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -902,11 +993,11 @@ local function watchServerSnapBack(character)
 	if lastRunStateAt > resetAt - 2.5 or os.clock() - lastRunStateAt < 3 then return end
 
 	local forced = movement.immortal and movement.immortalTweaks
-	if not (movement.fastDash or forced or movement.instantAccel or movement.freeDash or movement.dashAnytime) then return end
+	if not (movement.fastDash or forced or movement.instantAccel or movement.freeDash or movement.dashAnytime or tackle.noCooldown or tackle.reachAssist) then return end
 
 	-- No dash-time knob in play: the snap-back can only come from the acceleration or catcher-dash switches, so withdraw them.
 	if not (movement.fastDash or forced) then
-		for _, name in { "instantAccel", "freeDash", "dashAnytime" } do
+		for _, name in { "instantAccel", "freeDash", "dashAnytime", "tackleNoCooldown", "reachAssist" } do
 			local entry = ui and ui.Flags[name]
 			if entry and entry.Value == true then entry.Set(false) end
 		end
@@ -975,6 +1066,7 @@ local function step(deltaTime)
 		react(context)
 	elseif catcherActive() then
 		assistCatcher(context)
+		autoTackle(context)
 	end
 end
 
@@ -1065,13 +1157,24 @@ local function buildUi()
 	move:AddToggle({ Text = "Instant acceleration", Default = false, Flag = "instantAccel", Callback = function(on) movement.instantAccel = on end })
 	move:AddToggle({ Text = "Speed tuning", Default = false, Flag = "speed", Callback = function(on) movement.speed = on end })
 	move:AddSlider({ Text = "Speed boost (%)", Min = 0, Max = 25, Default = 5, Increment = 1, Flag = "speedBoost", Callback = function(value) movement.speedBoost = value end })
-	move:AddSection("Catcher")
-	move:AddToggle({ Text = "Catcher: dash key uses the tackle", Default = false, Flag = "catcherDash", Callback = function(on) movement.catcherDash = on end })
-	move:AddKeybind({ Text = "Catcher dash key", Default = Enum.KeyCode.LeftShift, Flag = "catcherDashKey", Pressed = function() requestCatcherDash() end })
-	move:AddLabel("A catcher's own dash is the tackle, not the runner dash. This binds it to the key below (the game's cooldown still applies). With free-direction dash on it also turns you toward the direction you picked first. Auto Ability (Q) also fires for catchers when a runner is close.")
 	move:AddSection("Safety")
 	move:AddToggle({ Text = "Auto-off on a fair-play warning", Default = true, Flag = "guardStop" })
 	move:AddLabel("The server watches movement. Short tests of no cooldown, a 1.5x dash and +10% speed drew no warning, but the further you push past the game's own numbers the more likely one gets. If it warns you, these switch themselves off.")
+
+	window:CreateCategory("Catcher")
+	local catch = window:CreateTab("Catcher")
+	catch:AddSection("Tackle")
+	catch:AddToggle({ Text = "Auto Tackle (dives at the closest runner in range)", Default = false, Flag = "autoTackle", Callback = function(on) tackle.auto = on end })
+	catch:AddSlider({ Text = "Tackle range (studs)", Min = 3, Max = 9, Default = 5.5, Increment = 0.5, Flag = "tackleRange", Callback = function(value) tackle.range = value end })
+	catch:AddDropdown({ Text = "Tackle aim", Options = { "Nearest runner", "Movement keys", "Camera", "Character facing" }, Default = "Nearest runner", Flag = "tackleAim", Callback = function(value) tackle.aim = value end })
+	catch:AddToggle({ Text = "Tackle on a key (the catcher's dash)", Default = false, Flag = "catcherDash", Callback = function(on) tackle.key = on end })
+	catch:AddKeybind({ Text = "Tackle key", Default = Enum.KeyCode.LeftShift, Flag = "catcherDashKey", Pressed = function() requestCatcherDash() end })
+	catch:AddToggle({ Text = "No tackle cooldown", Default = false, Flag = "tackleNoCooldown", Callback = function(on) tackle.noCooldown = on end })
+	catch:AddLabel("A catcher's own dash is the tackle, so these are the catcher versions of the runner dash tweaks. The key and Auto Tackle turn you toward the chosen aim first, then dive; the game's own readiness checks still apply. The server keeps its own tackle timer, so No tackle cooldown may be refused or snap you back, and the hub then switches it off by itself.")
+	catch:AddSection("Hitbox")
+	catch:AddToggle({ Text = "Reach assist (hitbox expander, experimental)", Default = false, Flag = "reachAssist", Callback = function(on) tackle.reachAssist = on syncReach() end })
+	catch:AddSlider({ Text = "Extra reach (studs)", Min = 0.5, Max = 2, Default = 1.5, Increment = 0.5, Flag = "tackleReach", Callback = function(value) tackle.reach = value syncReach() end })
+	catch:AddLabel("Catches are decided by the server, so a hitbox cannot be resized from here. This instead starts each tackle a little further forward than you are (the server tolerates about 2.5 studs of position error), which lengthens your effective reach by that much. Untested against the server's hit rules; it switches itself off on a snap-back or a fair-play warning.")
 
 	window:CreateCategory("Utility")
 	local visuals = window:CreateTab("Visuals")
@@ -1093,6 +1196,36 @@ function HussValley.init()
 	tacklePrediction = loadModule(replicatedStorage.ChickenOrHero:WaitForChild("Game"):WaitForChild("TacklePrediction"))
 	if tacklePrediction and type(tacklePrediction.request) ~= "function" then tacklePrediction = nil end
 	setthreadidentity(8)
+	if tacklePrediction and type(tacklePrediction.remaining) == "function" then
+		originalRemaining = tacklePrediction.remaining
+		if not swapFunction(tacklePrediction, "remaining", tackleRemaining) then originalRemaining = nil end
+	end
+
+	-- Reach assist: shift the start position sent with a tackle forward a little (the server accepts a few studs of
+	-- position error). One hook per session, kept in getgenv so a re-execute never stacks a second one; it does nothing
+	-- while the reach is 0.
+	local gameAction = replicatedStorage.ChickenOrHero:WaitForChild("Game"):WaitForChild("GameAction")
+	tackleHook = getgenv().HussValleyTackleHook
+	if not tackleHook then
+		tackleHook = { remote = gameAction, reach = 0 }
+		getgenv().HussValleyTackleHook = tackleHook
+		local hookData = tackleHook
+		local originalNamecall
+		originalNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+			if hookData.reach > 0 and self == hookData.remote and getnamecallmethod() == "FireServer" then
+				local kind, payload = ...
+				if kind == "Tackle" and type(payload) == "table" and typeof(payload.position) == "Vector3" and typeof(payload.direction) == "Vector3" then
+					local shifted = table.clone(payload)
+					shifted.position = payload.position + payload.direction * hookData.reach
+					return originalNamecall(self, kind, shifted)
+				end
+			end
+
+			return originalNamecall(self, ...)
+		end))
+	end
+	tackleHook.remote = gameAction
+	syncReach()
 	participantDirectory = loadModule(replicatedStorage.ChickenOrHero:WaitForChild("Presentation"):WaitForChild("ParticipantDirectory"))
 
 	guiParent = resolveGuiParent()
@@ -1109,6 +1242,8 @@ function HussValley.init()
 		movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
 		movement.fullDash, movement.immortalTweaks = false, false
 		movement.instantAccel, movement.catcherDash, movement.freeDash = false, false, false
+		tackle.noCooldown, tackle.reachAssist = false, false
+		syncReach()
 		guardTripped = true
 		log("fair-play warning: movement tweaks off")
 	end))
@@ -1164,6 +1299,7 @@ end
 -- Tunables (reaction boxes, lockouts, debug logging) stay reachable at runtime: shared.HussValley.config.debug = true
 HussValley.config = CONFIG
 HussValley.movement = movement
+HussValley.tackle = tackle
 
 shared.HussValley = HussValley
 xpcall(HussValley.init, onError)
