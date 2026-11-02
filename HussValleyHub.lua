@@ -118,6 +118,11 @@ local movement = {
 	instantAccel = false,
 	-- Catchers have no dash in the game; this switches the dash on for them (they trigger it with catcherDashKey).
 	catcherDash = false,
+	-- Dash wherever you point it without turning away from your current direction first (the game normally refuses a dash
+	-- unless it is at least 35 degrees away from where you were just travelling), including straight ahead.
+	freeDash = false,
+	-- Which way a free dash goes: the keys you are holding, the camera, or the way the character faces.
+	dashDirection = "Movement keys",
 	speed = false,
 	-- Percent added on top of the live top speed, which itself moves with the round's balance buffs (about 37-42).
 	speedBoost = 5,
@@ -142,6 +147,7 @@ local tuning = {
 	fullDash = false,
 	instantAccel = false,
 	catcherDash = false,
+	freeDash = false,
 	speed = false,
 	boost = 5,
 }
@@ -162,6 +168,7 @@ local function refreshTuning()
 	tuning.fullDash = movement.fullDash or forced
 	tuning.instantAccel = movement.instantAccel
 	tuning.catcherDash = movement.catcherDash
+	tuning.freeDash = movement.freeDash or forced
 	tuning.speed = movement.speed
 	tuning.boost = movement.speedBoost
 end
@@ -169,6 +176,8 @@ local movementProfiles = nil
 local originalGet = nil
 local dashAnimation = nil
 local originalPlay = nil
+local movementModel = nil
+local originalStep = nil
 local profileCache = setmetatable({}, { __mode = "k" })
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -341,6 +350,60 @@ local function playDashAnimation(character, ...)
 	return originalPlay(character, ...)
 end
 
+-- Which way a free dash should go.
+---@param moveDirection Vector3
+---@return Vector3?
+local function chooseDashDirection(moveDirection)
+	local keys = Vector3.new(moveDirection.X, 0, moveDirection.Z)
+
+	-- When the hub itself is steering (Auto Dodge / Immortal) the steered direction is already in moveDirection.
+	if hookState.steer ~= nil and os.clock() < hookState.expiresAt and keys.Magnitude > 0.05 then return keys.Unit end
+
+	local camera = workspace.CurrentCamera
+	local look = camera and camera.CFrame.LookVector or Vector3.new(0, 0, -1)
+	local cameraForward = Vector3.new(look.X, 0, look.Z)
+	cameraForward = cameraForward.Magnitude > 0.01 and cameraForward.Unit or nil
+
+	if movement.dashDirection == "Camera" then return cameraForward end
+
+	if movement.dashDirection == "Character facing" then
+		local root = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+		local facing = root and Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+		if facing and facing.Magnitude > 0.01 then return facing.Unit end
+
+		return cameraForward
+	end
+
+	-- Movement keys: the way you are pressing; nothing pressed means straight ahead of the camera.
+	if keys.Magnitude > 0.05 then return keys.Unit end
+
+	return cameraForward
+end
+
+-- Replacement for MovementModel.step. The game dashes along the part of your input that is not already your travel
+-- direction, and only when that turn is wide enough, so you cannot dash the way you are running or from a standstill.
+-- With free dash on, a dash request the game would accept anyway gets a fake history entry saying we were just
+-- travelling the opposite way, plus the direction we picked as the input, so the game's own rule is satisfied.
+-- Anything that is not a live dash request passes straight through untouched.
+local function freeDashStep(model, moveDirection, speed, dt, profile, grounded, a, b, request, velocity, touch)
+	if request == true and movementModel and (movement.freeDash or (movement.immortal and movement.immortalTweaks)) then
+		pcall(function()
+			if type(profile) ~= "table" or type(profile.Dash) ~= "table" or not profile.Dash.Enabled then return end
+			if not movementModel.canBoost(model, profile, grounded ~= false) then return end
+
+			local direction = chooseDashDirection(moveDirection)
+			if not direction then return end
+
+			-- Full entry speed so the dash keeps its full length even from a standstill.
+			table.insert(model.travelHistory, { at = model.travelClock, direction = -direction, speed = profile.MaxSpeed })
+			moveDirection = direction
+			speed = math.max(speed, profile.StopThreshold * 2 + 0.05)
+		end)
+	end
+
+	return originalStep(model, moveDirection, speed, dt, profile, grounded, a, b, request, velocity, touch)
+end
+
 local function installMovement()
 	local folder = replicatedStorage:WaitForChild("ChickenOrHero"):WaitForChild("Movement")
 	movementProfiles = loadModule(folder:WaitForChild("MovementProfiles"))
@@ -366,16 +429,29 @@ local function installMovement()
 	else
 		dashAnimation = nil
 	end
+
+	movementModel = loadModule(folder:WaitForChild("MovementModel"))
+	if movementModel and type(movementModel.step) == "function" and type(movementModel.canBoost) == "function" then
+		originalStep = movementModel.step
+		if not swapFunction(movementModel, "step", freeDashStep) then
+			warn("[HV] could not patch MovementModel; free dash is unavailable")
+			movementModel, originalStep = nil, nil
+		end
+	else
+		movementModel = nil
+	end
 end
 
 local function restoreMovement()
 	if movementProfiles and movementProfiles.get == retunedProfile then swapFunction(movementProfiles, "get", originalGet) end
 	if dashAnimation and dashAnimation.play == playDashAnimation then swapFunction(dashAnimation, "play", originalPlay) end
 	dashAnimation, originalPlay = nil, nil
+	if movementModel and movementModel.step == freeDashStep then swapFunction(movementModel, "step", originalStep) end
+	movementModel, originalStep = nil, nil
 
 	movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
 	movement.skipAnimation, movement.immortal, movement.fullDash = false, false, false
-	movement.instantAccel, movement.catcherDash = false, false
+	movement.instantAccel, movement.catcherDash, movement.freeDash = false, false, false
 	movementProfiles, originalGet = nil, nil
 	table.clear(profileCache)
 end
@@ -685,7 +761,7 @@ local function react(context)
 
 		-- Standing still: the game only dashes when it has seen us move in the last ~0.4s (it turns away from that
 		-- travel), so nudge the opposite way for two frames first, then dash. Moving: dash straight away.
-		if planar < CONFIG.minDashSpeed then
+		if planar < CONFIG.minDashSpeed and not tuning.freeDash then
 			if not primeState then
 				primeState = { direction = pickEvasion(threats, context.character, position, velocity, true), frames = 0 }
 			end
@@ -696,7 +772,7 @@ local function react(context)
 			if not primeState or primeState.frames < 3 or planar < 0.2 then return end
 		end
 
-		local direction = primeState and primeState.direction or pickEvasion(threats, context.character, position, velocity, false)
+		local direction = primeState and primeState.direction or pickEvasion(threats, context.character, position, velocity, tuning.freeDash)
 		primeState = nil
 
 		lastDash = now
@@ -759,7 +835,7 @@ end
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
 	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
-	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "speed", "immortalTweaks" } do
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "speed", "immortalTweaks" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -783,11 +859,11 @@ local function watchServerSnapBack(character)
 	lastReset = reset
 
 	local forced = movement.immortal and movement.immortalTweaks
-	if not (movement.fastDash or forced or movement.instantAccel or movement.catcherDash) or os.clock() - lastRunStateAt < 1.5 then return end
+	if not (movement.fastDash or forced or movement.instantAccel or movement.catcherDash or movement.freeDash) or os.clock() - lastRunStateAt < 1.5 then return end
 
 	-- No dash-time knob in play: the snap-back can only come from the acceleration or catcher-dash switches, so withdraw them.
 	if not (movement.fastDash or forced) then
-		for _, name in { "instantAccel", "catcherDash" } do
+		for _, name in { "instantAccel", "catcherDash", "freeDash" } do
 			local entry = ui and ui.Flags[name]
 			if entry and entry.Value == true then entry.Set(false) end
 		end
@@ -929,6 +1005,10 @@ local function buildUi()
 	move:AddSection("Dash distance")
 	move:AddToggle({ Text = "Longer dash", Default = false, Flag = "longDash", Callback = function(on) movement.longDash = on end })
 	move:AddSlider({ Text = "Distance multiplier", Min = 1.1, Max = 3, Default = 1.5, Increment = 0.1, Flag = "dashScale", Callback = function(value) movement.dashScale = value end })
+	move:AddSection("Dash direction")
+	move:AddToggle({ Text = "Free-direction dash (no turning, dash forward too)", Default = false, Flag = "freeDash", Callback = function(on) movement.freeDash = on end })
+	move:AddDropdown({ Text = "Dash toward", Options = { "Movement keys", "Camera", "Character facing" }, Default = "Movement keys", Flag = "dashDirection", Callback = function(value) movement.dashDirection = value end })
+	move:AddLabel("Use your normal dash key. The dash goes the way you point it, even straight ahead while running that way, or from a standstill. Movement keys = the keys you hold (camera forward if none); Camera and Character facing ignore the keys.")
 	move:AddToggle({ Text = "Full-distance dash from a standstill", Default = false, Flag = "fullDash", Callback = function(on) movement.fullDash = on end })
 	move:AddSection("Instant dash")
 	move:AddToggle({ Text = "Faster / instant dash", Default = false, Flag = "fastDash", Callback = function(on) movement.fastDash = on end })
@@ -979,7 +1059,7 @@ function HussValley.init()
 
 		movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
 		movement.fullDash, movement.immortalTweaks = false, false
-		movement.instantAccel, movement.catcherDash = false, false
+		movement.instantAccel, movement.catcherDash, movement.freeDash = false, false, false
 		guardTripped = true
 		log("fair-play warning: movement tweaks off")
 	end))
