@@ -21,13 +21,16 @@ Script hub for **Survive a Million Monkeys** with a premium UI (hypercar intro, 
 
 ## Huss Valley Hub
 
-Auto Dodge (dashes out of catcher swings and tackles through the game's own dash), Auto Ability (Q), Immortal (best effort), Movement tweaks, Threat ESP and Anti-AFK. Catches are decided by the server, so Immortal cannot be true god mode; it dodges every committed hit it can see. **RightShift** opens and closes the menu. The window is built with `GlassUI` (loaded from `glassui.lua` in your executor workspace if present, otherwise downloaded from this repo), and "Unload UI" in its Settings tab unloads the whole script.
+Auto Dodge (dashes out of catcher swings and tackles through the game's own dash), Auto Ability (Q), Immortal (best effort), Movement tweaks, Threat ESP and Anti-AFK.
+
+**Immortal** watches every attack within about 45 studs, from any side and any number at once (melee swings, tackle dives, and a locked-on catcher that is about to swing). It picks the landing spot that is outside all of their hit zones, accounting for walls and the game's dash turn rule, and dashes there. While it is on it also forces **no dash cooldown**, **no recovery**, **full-distance dashes even from a standstill**, and the fastest dash the server accepted in testing (about 0.04 s), so it can dash again the instant the next attack lands. Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow. Turn off "Immortal: no cooldown + fastest dash" to keep the dodging but use the normal dash. **RightShift** opens and closes the menu. The window is built with `GlassUI` (loaded from `glassui.lua` in your executor workspace if present, otherwise downloaded from this repo), and "Unload UI" in its Settings tab unloads the whole script.
 
 Movement tab (retunes the game's own movement profile, nothing is written into game memory):
 
 - **No dash cooldown** (with an optional cooldown cap and "skip recovery"): a dash every ~0.3 s instead of every ~0.7 s. Auto Dodge re-arms right after each dash.
 - **Longer dash**: 1.1x to 3x dash distance.
 - **Faster / instant dash**: the dash covers the same distance in 15% to 100% of the normal time (15% is about 0.04 s, near-instant). Truly instant (0%) is refused by the server, which snaps you back, so the slider stops at 15%; if a snap-back still happens the hub raises the dash time for you.
+- **Full-distance dash from a standstill**: the game normally shortens a dash by how fast you were already moving, so a dash from standing still barely moves; this keeps it full length.
 - **Skip dash animation**: the dash happens without the dash animation (your character only).
 - **Speed boost**: 0 to 25 percent on top of the live top speed.
 - **Auto-off on a fair-play warning**: if the game's anti-cheat warns you, every movement tweak switches itself off.

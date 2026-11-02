@@ -1,5 +1,7 @@
 -- Huss Valley hub: Auto Dodge, Auto Ability, Immortal (best effort), Movement (no dash cooldown, longer dash, speed),
 -- Threat ESP, Anti-AFK.
+-- Auto Dodge / Immortal watch every attack within ~45 studs (all sides, any number at once), choose a landing spot that is
+-- outside all of their danger zones, and dash there through the game's own BoostInput.
 -- Verified against place 107535308163741 (v507): catcher swings/tackles are visible as character
 -- attributes, a dash goes through ChickenOrHero.Movement.BoostInput, catches themselves are server-side.
 -- Movement tweaks retune the game's own movement profile (MovementProfiles.get), so cooldown, recovery, distance and
@@ -21,8 +23,22 @@ local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/mai
 
 -- Per-game values. Each one comes from the decompiled client config named next to it.
 local CONFIG = {
-	tickRate = 1 / 60,
+	-- 0 = react on every frame; a dodge cannot afford to wait for a throttled tick.
+	tickRate = 0,
 	espRate = 0.25,
+	-- Attackers further than this (studs) cannot reach us before we can react.
+	vicinity = 45,
+	-- A catcher can still turn up to ContactCatchConfig.WindupAimLimit (20 degrees) while winding up, so a swing's danger zone
+	-- widens with distance.
+	aimSlack = math.tan(math.rad(20)),
+	-- Directions tried when choosing where to dash.
+	candidateDirections = 16,
+	-- Immortal also steps away from a catcher that is locked on to us and this close (about to swing), at most this often.
+	closeTrackingDistance = 7,
+	trackingLockout = 0.25,
+	-- MovementProfiles Runner Dash.Duration, and the settle time after it before another dash can be requested.
+	dashDuration = 0.28,
+	dashSettle = 0.03,
 	-- ContactCatchConfig: ReachDistance 12, HitHalfWidth 1.4, RunnerRadius 0.9, ContactPadding 0.35.
 	meleeForward = 13,
 	meleeBehind = 1.5,
@@ -38,15 +54,15 @@ local CONFIG = {
 	-- How long the steered MoveDirection stays active; the game reads it once per frame.
 	steerHold = 0.12,
 	dashLockout = 0.3,
-	-- Re-dodge gap while the dash cooldown is removed: a dash lasts 0.28s, so this only waits for it to finish.
-	fastDashLockout = 0.12,
+	-- Re-dodge gap while the dash cooldown is removed (the dash itself still has to finish first).
+	fastDashLockout = 0.05,
 	abilityLockout = 1,
 	-- MovementProfiles Runner Dash: MinIntentAngle 35, ~10.9 studs.
 	minIntentCos = math.cos(math.rad(35)),
 	dashDistance = 11,
 	minDashSpeed = 3,
 	wallPadding = 2,
-	immortalMargin = 1.5,
+	immortalMargin = 3,
 	debug = false,
 }
 
@@ -93,10 +109,50 @@ local movement = {
 	fastDash = false,
 	dashTime = 50,
 	skipAnimation = false,
+	-- The game scales a dash by how fast you were already moving (Dash.ScaleDistanceWithSpeed), so a dash from a standstill
+	-- barely moves. This keeps it full length.
+	fullDash = false,
 	speed = false,
 	-- Percent added on top of the live top speed, which itself moves with the round's balance buffs (about 37-42).
 	speedBoost = 5,
+	-- Immortal preset. While it is on (and immortalTweaks is allowed) the dash has no cooldown and runs at
+	-- immortalDashTime percent of its normal duration, whatever the individual switches above say.
+	immortal = false,
+	immortalTweaks = true,
+	immortalDashTime = 15,
 }
+
+-- What the movement wrapper applies right now: the user's own switches combined with the Immortal preset's.
+local tuning = {
+	noCooldown = false,
+	gap = 0,
+	skipRecovery = true,
+	longDash = false,
+	scale = 1.5,
+	fastDash = false,
+	dashTime = 100,
+	fullDash = false,
+	speed = false,
+	boost = 5,
+}
+
+local function refreshTuning()
+	local forced = movement.immortal and movement.immortalTweaks
+	tuning.noCooldown = movement.noCooldown or forced
+	tuning.gap = forced and 0 or movement.cooldownGap
+	tuning.skipRecovery = movement.skipRecovery or forced
+	tuning.longDash = movement.longDash
+	tuning.scale = movement.dashScale
+	tuning.fastDash = movement.fastDash or forced
+	if forced then
+		tuning.dashTime = movement.fastDash and math.min(movement.dashTime, movement.immortalDashTime) or movement.immortalDashTime
+	else
+		tuning.dashTime = movement.dashTime
+	end
+	tuning.fullDash = movement.fullDash or forced
+	tuning.speed = movement.speed
+	tuning.boost = movement.speedBoost
+end
 local movementProfiles = nil
 local originalGet = nil
 local dashAnimation = nil
@@ -184,8 +240,8 @@ end
 local function tuneProfile(profile)
 	local clone = table.clone(profile)
 
-	if movement.speed and type(profile.MaxSpeed) == "number" and profile.MaxSpeed > 0 then
-		local factor = 1 + movement.speedBoost / 100
+	if tuning.speed and type(profile.MaxSpeed) == "number" and profile.MaxSpeed > 0 then
+		local factor = 1 + tuning.boost / 100
 		clone.MaxSpeed = profile.MaxSpeed * factor
 		-- Scale acceleration with it so the new top speed is reached in the time the game intended.
 		clone.Acceleration = profile.Acceleration * factor
@@ -194,13 +250,14 @@ local function tuneProfile(profile)
 	local dash = profile.Dash
 	if type(dash) == "table" and dash.Enabled then
 		local tuned = table.clone(dash)
-		if movement.noCooldown then
-			tuned.Cooldown = math.min(dash.Cooldown, movement.cooldownGap)
-			if movement.skipRecovery then tuned.RecoveryDuration = 0 end
+		if tuning.noCooldown then
+			tuned.Cooldown = math.min(dash.Cooldown, tuning.gap)
+			if tuning.skipRecovery then tuned.RecoveryDuration = 0 end
 		end
-		if movement.longDash then tuned.Distance = dash.Distance * movement.dashScale end
+		if tuning.longDash then tuned.Distance = dash.Distance * tuning.scale end
 		-- Same distance in less time. The game's dash model copes with a duration shorter than one frame by finishing in that frame.
-		if movement.fastDash then tuned.Duration = math.max(0.001, dash.Duration * movement.dashTime / 100) end
+		if tuning.fastDash then tuned.Duration = math.max(0.001, dash.Duration * tuning.dashTime / 100) end
+		if tuning.fullDash then tuned.ScaleDistanceWithSpeed = false end
 		clone.Dash = table.freeze(tuned)
 	end
 
@@ -216,10 +273,12 @@ end
 local function retunedProfile(role, player)
 	local profile = originalGet(role, player)
 	if player ~= localPlayer or type(profile) ~= "table" then return profile end
-	if not (movement.noCooldown or movement.longDash or movement.fastDash or movement.speed) then return profile end
+
+	refreshTuning()
+	if not (tuning.noCooldown or tuning.longDash or tuning.fastDash or tuning.fullDash or tuning.speed) then return profile end
 
 	local success, result = pcall(function()
-		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%.1f", tostring(movement.noCooldown), movement.cooldownGap, tostring(movement.skipRecovery), tostring(movement.longDash), movement.dashScale, tostring(movement.fastDash), movement.dashTime, tostring(movement.speed), movement.speedBoost)
+		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%s|%.1f", tostring(tuning.noCooldown), tuning.gap, tostring(tuning.skipRecovery), tostring(tuning.longDash), tuning.scale, tostring(tuning.fastDash), tuning.dashTime, tostring(tuning.fullDash), tostring(tuning.speed), tuning.boost)
 		local variants = profileCache[profile]
 		if not variants then
 			variants = {}
@@ -295,7 +354,7 @@ local function restoreMovement()
 	dashAnimation, originalPlay = nil, nil
 
 	movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
-	movement.skipAnimation = false
+	movement.skipAnimation, movement.immortal, movement.fullDash = false, false, false
 	movementProfiles, originalGet = nil, nil
 	table.clear(profileCache)
 end
@@ -369,13 +428,25 @@ local function corridor(origin, direction, position)
 	return forward, lateral
 end
 
--- Finds the most urgent committed attack that will pass through our position.
+-- Signed distance from a point to a threat's danger zone: positive = outside it by that many studs, zero or negative = inside.
+---@param threat table
+---@param point Vector3
+---@return number
+local function safety(threat, point)
+	local forward, lateral = corridor(threat.origin, threat.dir, point)
+	local outsideAlong = math.max(-threat.behind - forward, forward - threat.limit)
+	local outsideSide = math.abs(lateral) - (threat.half + threat.slack * math.max(forward, 0))
+	return math.max(outsideAlong, outsideSide)
+end
+
+-- Collects every attack near us, from any side: melee swings, tackle dives and (optionally) a catcher about to swing.
 ---@param position Vector3
----@return table?
-local function scanThreat(position)
+---@return table
+local function scanThreats(position)
 	local extra = margin()
 	local serverNow = workspace:GetServerTimeNow()
-	local best = nil
+	local immortal = immortalOn()
+	local threats = {}
 
 	for _, participant in participants() do
 		if participant == localPlayer or not isCatcher(participant) then continue end
@@ -385,13 +456,17 @@ local function scanThreat(position)
 		if not root then continue end
 
 		local origin = root.Position
-		local candidates = {}
+		if flat(position - origin).Magnitude > CONFIG.vicinity then continue end
 
 		-- Melee swing: Windup then Active, aimed along ReachDirection.
 		local phase = character:GetAttribute("ReachPhase")
 		local reachDirection = character:GetAttribute("ReachDirection")
 		if (phase == "Windup" or phase == "Active") and typeof(reachDirection) == "Vector3" and flat(reachDirection).Magnitude > 0.01 then
-			table.insert(candidates, { kind = "Melee", dir = flat(reachDirection).Unit, forward = CONFIG.meleeForward, behind = CONFIG.meleeBehind, half = CONFIG.meleeHalfWidth })
+			table.insert(threats, {
+				kind = "Melee", catcher = participant.Name, origin = origin, dir = flat(reachDirection).Unit,
+				limit = CONFIG.meleeForward, behind = CONFIG.meleeBehind, half = CONFIG.meleeHalfWidth + extra,
+				slack = phase == "Windup" and CONFIG.aimSlack or 0,
+			})
 		end
 
 		-- Tackle dive: TackleActive for TackleDuration along TackleDirection.
@@ -400,53 +475,65 @@ local function scanThreat(position)
 			local startedAt = tonumber(character:GetAttribute("TackleStartedAt"))
 			local duration = tonumber(character:GetAttribute("TackleDuration")) or 0.4
 			if not startedAt or (serverNow - startedAt) <= duration + CONFIG.tackleGrace then
-				table.insert(candidates, { kind = "Tackle", dir = flat(tackleDirection).Unit, forward = CONFIG.tackleForward, behind = CONFIG.tackleBehind, half = CONFIG.tackleHalfWidth })
+				table.insert(threats, {
+					kind = "Tackle", catcher = participant.Name, origin = origin, dir = flat(tackleDirection).Unit,
+					limit = CONFIG.tackleForward, behind = CONFIG.tackleBehind, half = CONFIG.tackleHalfWidth + extra, slack = 0,
+				})
 			end
 		end
 
-		-- A catcher locked on to us that is already close; only when the user wants early reactions.
-		if (flag("early") or immortalOn()) and phase == "Tracking" and character:GetAttribute("ReachTargetUserId") == localPlayer.UserId then
+		-- A catcher locked on to us and close enough to swing next.
+		if (flag("early") or immortal) and phase == "Tracking" and character:GetAttribute("ReachTargetUserId") == localPlayer.UserId then
 			local toUs = flat(position - origin)
-			if toUs.Magnitude <= CONFIG.trackingDistance + extra and toUs.Magnitude > 0.01 then
-				table.insert(candidates, { kind = "Tracking", dir = toUs.Unit, forward = CONFIG.trackingDistance + extra, behind = 0, half = 3 + extra })
-			end
-		end
-
-		for _, candidate in candidates do
-			local forward, lateral = corridor(origin, candidate.dir, position)
-			if forward >= -candidate.behind and forward <= candidate.forward and math.abs(lateral) <= candidate.half + extra then
-				if not best or forward < best.forward then
-					best = { kind = candidate.kind, dir = candidate.dir, forward = forward, lateral = lateral, catcher = participant.Name }
-				end
+			local close = flag("early") and CONFIG.trackingDistance or CONFIG.closeTrackingDistance
+			if toUs.Magnitude <= close + extra and toUs.Magnitude > 0.01 then
+				table.insert(threats, {
+					kind = "Tracking", catcher = participant.Name, origin = origin, dir = toUs.Unit,
+					limit = close + extra, behind = 0, half = 3 + extra, slack = 0,
+				})
 			end
 		end
 	end
 
-	return best
+	return threats
 end
 
--- Picks the sideways direction with the best clearance that the game's dash will accept as a redirect.
----@param threat table
+-- Picks where to dash: tries every direction, lands each one against walls, and keeps the one that ends up furthest
+-- outside ALL the attackers' danger zones, preferring directions the game's dash accepts as a redirect.
+---@param threats table
 ---@param character Model
 ---@param position Vector3
 ---@param velocity Vector3
+---@param standing boolean
 ---@return Vector3
-local function pickEvasion(threat, character, position, velocity)
-	local perp = Vector3.new(-threat.dir.Z, 0, threat.dir.X)
-	local preferred = threat.lateral >= 0 and perp or -perp
+local function pickEvasion(threats, character, position, velocity, standing)
 	local planar = flat(velocity)
-	local travel = planar.Magnitude > CONFIG.minDashSpeed and planar.Unit or nil
-	local reach = CONFIG.dashDistance + CONFIG.wallPadding
+	local travel = (not standing and planar.Magnitude > 0.01) and planar.Unit or nil
+	local reach = CONFIG.dashDistance * (movement.longDash and movement.dashScale or 1)
 
 	rayParams.FilterDescendantsInstances = { character }
 
-	local bestDirection = preferred
+	local bestDirection = Vector3.new(1, 0, 0)
 	local bestScore = -math.huge
-	for _, direction in { preferred, -preferred } do
-		local hit = workspace:Raycast(position, direction * reach, rayParams)
-		local clearance = hit and hit.Distance or reach
-		local legal = not travel or direction:Dot(travel) <= CONFIG.minIntentCos
-		local score = clearance * (legal and 1 or 0.4) + (direction == preferred and 0.5 or 0)
+	for index = 0, CONFIG.candidateDirections - 1 do
+		local angle = index * 2 * math.pi / CONFIG.candidateDirections
+		local direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
+
+		local hit = workspace:Raycast(position, direction * (reach + CONFIG.wallPadding), rayParams)
+		local clearance = hit and hit.Distance or reach + CONFIG.wallPadding
+		local travelled = math.clamp(clearance - 1, 0, reach)
+		local landing = position + direction * travelled
+
+		local worst = math.huge
+		for _, threat in threats do
+			worst = math.min(worst, safety(threat, landing))
+		end
+
+		local legal = travel == nil or direction:Dot(travel) <= CONFIG.minIntentCos
+		local score = math.min(worst, 8) * 10 - (reach - travelled) * 2 - (legal and 0 or 60)
+		-- Tie-break toward the way we are already heading so dodges stay natural.
+		if travel then score = score + direction:Dot(travel) * 0.5 end
+
 		if score > bestScore then
 			bestScore = score
 			bestDirection = direction
@@ -485,44 +572,93 @@ local function pressAbility()
 	log("ability pressed")
 end
 
+-- Can a dash start right now? The game's DashReady attribute only refreshes every 0.1s, which is too slow once the
+-- cooldown is gone, so with no cooldown we also trust our own clock (dash duration plus a short settle).
+---@param character Model
+---@param now number
+---@return boolean
+local function dashReady(character, now)
+	if not boostInput then return false end
+
+	refreshTuning()
+	local seconds = CONFIG.dashDuration * (tuning.fastDash and tuning.dashTime / 100 or 1)
+	local settled = tuning.noCooldown and now - lastDash >= seconds + CONFIG.dashSettle
+	local ready = (character:GetAttribute("DashReady") == true or settled) and boostInput.available(localPlayer)
+	setthreadidentity(8)
+
+	return ready
+end
+
+-- Dashes out of every attack near us. State of an in-progress "standing still" prime lives in primeState.
+local primeState = nil
+
 ---@param context table
 local function react(context)
 	local dodgeOn = flag("autoDodge") or immortalOn()
 	local abilityOn = flag("autoAbility") or immortalOn()
-	if not dodgeOn and not abilityOn then return end
-
-	local threat = scanThreat(context.root.Position)
-	if not threat then return end
-
-	local now = os.clock()
-	local dashReady = boostInput ~= nil
-		and context.character:GetAttribute("DashReady") == true
-		and boostInput.available(localPlayer)
-	setthreadidentity(8)
-
-	log("threat", threat.kind, threat.catcher, "dashReady", dashReady, "sinceDash", string.format("%.2f", now - lastDash))
-
-	local lockout = movement.noCooldown and CONFIG.fastDashLockout or CONFIG.dashLockout
-	if dodgeOn and dashReady and now - lastDash >= lockout then
-		local velocity = context.root.AssemblyLinearVelocity
-		local direction = pickEvasion(threat, context.character, context.root.Position, velocity)
-		lastDash = now
-		lastDashCount = context.character:GetAttribute("DashCount")
-		steer(direction, CONFIG.steerHold)
-
-		-- The dash only fires while we are already moving; standing still just sidesteps.
-		local moving = flat(velocity).Magnitude >= CONFIG.minDashSpeed
-		if moving then
-			boostInput.request()
-			setthreadidentity(8)
-		end
-
-		log("dodge", threat.kind, threat.catcher, string.format("fwd %.1f lat %.1f", threat.forward, threat.lateral), "requested", moving, "dir", direction)
+	if not dodgeOn and not abilityOn then
+		primeState = nil
 		return
 	end
 
+	local position = context.root.Position
+	local threats = scanThreats(position)
+
+	-- Which of them can reach us where we stand right now?
+	local inside, committed = false, false
+	for _, threat in threats do
+		if safety(threat, position) <= 0 then
+			inside = true
+			if threat.kind ~= "Tracking" then committed = true end
+		end
+	end
+
+	if not inside then
+		primeState = nil
+		return
+	end
+
+	local now = os.clock()
+	local ready = dashReady(context.character, now)
+	refreshTuning()
+
+	log("threats", #threats, "committed", committed, "dashReady", ready, "sinceDash", string.format("%.2f", now - lastDash))
+
+	local lockout = committed and (tuning.noCooldown and CONFIG.fastDashLockout or CONFIG.dashLockout) or CONFIG.trackingLockout
+	if dodgeOn and ready and now - lastDash >= lockout then
+		local velocity = context.root.AssemblyLinearVelocity
+		local planar = flat(velocity).Magnitude
+
+		-- Standing still: the game only dashes when it has seen us move in the last ~0.4s (it turns away from that
+		-- travel), so nudge the opposite way for two frames first, then dash. Moving: dash straight away.
+		if planar < CONFIG.minDashSpeed then
+			if not primeState then
+				primeState = { direction = pickEvasion(threats, context.character, position, velocity, true), frames = 0 }
+			end
+
+			primeState.frames = primeState.frames + 1
+			steer(-primeState.direction, 0.1)
+			if primeState.frames > 8 then primeState = nil end
+			if not primeState or primeState.frames < 3 or planar < 0.2 then return end
+		end
+
+		local direction = primeState and primeState.direction or pickEvasion(threats, context.character, position, velocity, false)
+		primeState = nil
+
+		lastDash = now
+		lastDashCount = context.character:GetAttribute("DashCount")
+		steer(direction, CONFIG.steerHold)
+		boostInput.request()
+		setthreadidentity(8)
+
+		log("dodge", "dir", direction, "attackers", #threats)
+		return
+	end
+
+	primeState = nil
+
 	-- Dash spent (or off): fall back to the equipped Q ability while the attack is still on us.
-	if abilityOn and now - lastAbility >= CONFIG.abilityLockout and now - lastDash >= 0.1 then
+	if abilityOn and committed and now - lastAbility >= CONFIG.abilityLockout and now - lastDash >= 0.1 then
 		pressAbility()
 	end
 end
@@ -568,7 +704,8 @@ end
 
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
-	for _, name in { "noCooldown", "longDash", "fastDash", "speed" } do
+	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "speed", "immortalTweaks" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -591,12 +728,22 @@ local function watchServerSnapBack(character)
 	if reset == lastReset then return end
 	lastReset = reset
 
-	if not movement.fastDash or os.clock() - lastRunStateAt < 1.5 then return end
+	local forced = movement.immortal and movement.immortalTweaks
+	if not (movement.fastDash or forced) or os.clock() - lastRunStateAt < 1.5 then return end
 
-	local slower = math.min(100, movement.dashTime + 15)
-	log("server snapped us back; dash time", movement.dashTime, "->", slower)
-	local entry = ui and ui.Flags.dashTime
-	if entry then entry.Set(slower) end
+	-- Slow whichever fast dash is in force: the user's own slider and/or the Immortal preset's dash time.
+	local slower = 0
+	if movement.fastDash then
+		slower = math.min(100, movement.dashTime + 15)
+		local entry = ui and ui.Flags.dashTime
+		if entry then entry.Set(slower) end
+	end
+	if forced then
+		movement.immortalDashTime = math.min(100, movement.immortalDashTime + 15)
+		slower = math.max(slower, movement.immortalDashTime)
+	end
+
+	log("server snapped us back; dash time raised to", slower)
 	if uiWindow then
 		uiWindow:Notify({ Title = "Dash slowed down", Text = string.format("The server snapped you back, so the dash time was raised to %d%%.", slower), Duration = 6 })
 	end
@@ -698,8 +845,9 @@ local function buildUi()
 	combat:AddToggle({ Text = "React to tracking catchers", Default = false, Flag = "early" })
 	combat:AddSlider({ Text = "Danger margin (studs)", Min = 0, Max = 4, Default = 0, Increment = 0.5, Flag = "margin" })
 	combat:AddSection("Immortal")
-	combat:AddToggle({ Text = "Immortal (best effort)", Default = false, Flag = "immortal" })
-	combat:AddLabel("Catches are decided by the server, so this cannot give true god mode. It dashes out of every attack it can see and spends your Q ability.")
+	combat:AddToggle({ Text = "Immortal (best effort)", Default = false, Flag = "immortal", Callback = function(on) movement.immortal = on end })
+	combat:AddToggle({ Text = "Immortal: no cooldown + fastest dash", Default = true, Flag = "immortalTweaks", Callback = function(on) movement.immortalTweaks = on end })
+	combat:AddLabel("Dashes out of every attack near you from any side, even two at once, with no dash cooldown and the fastest dash the server accepts (about 0.04 s). Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow.")
 
 	window:CreateCategory("Movement")
 	local move = window:CreateTab("Movement")
@@ -710,6 +858,7 @@ local function buildUi()
 	move:AddSection("Dash distance")
 	move:AddToggle({ Text = "Longer dash", Default = false, Flag = "longDash", Callback = function(on) movement.longDash = on end })
 	move:AddSlider({ Text = "Distance multiplier", Min = 1.1, Max = 3, Default = 1.5, Increment = 0.1, Flag = "dashScale", Callback = function(value) movement.dashScale = value end })
+	move:AddToggle({ Text = "Full-distance dash from a standstill", Default = false, Flag = "fullDash", Callback = function(on) movement.fullDash = on end })
 	move:AddSection("Instant dash")
 	move:AddToggle({ Text = "Faster / instant dash", Default = false, Flag = "fastDash", Callback = function(on) movement.fastDash = on end })
 	move:AddSlider({ Text = "Dash time (% of normal)", Min = 15, Max = 100, Default = 50, Increment = 5, Flag = "dashTime", Callback = function(value) movement.dashTime = value end })
@@ -753,6 +902,7 @@ function HussValley.init()
 		if kind ~= "Warning" or not flag("guardStop") then return end
 
 		movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
+		movement.fullDash, movement.immortalTweaks = false, false
 		guardTripped = true
 		log("fair-play warning: movement tweaks off")
 	end))
