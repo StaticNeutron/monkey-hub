@@ -4,7 +4,8 @@
 -- and a dark/light theme sweep. Same API shape as ui.lua: CreateWindow -> CreateCategory/CreateTab -> Add*.
 --
 --   local UI = loadstring(readfile("glassui.lua"))()
---   local window = UI:CreateWindow({ Title = "My Hub", Subtitle = "game", ToggleKey = Enum.KeyCode.RightShift })
+--   local window = UI:CreateWindow({ Title = "My Hub", Subtitle = "game", ToggleKey = Enum.KeyCode.RightShift,
+--       Intro = true, OnDestroy = function() --[[ called after UI:Destroy(), e.g. to unload the script ]] end })
 --   local tab = window:CreateTab("Combat")
 --   tab:AddToggle({ Text = "Auto fight", Flag = "autoFight", Callback = function(on) end })
 --   UI.Flags.autoFight.Value, UI:Destroy()
@@ -984,7 +985,7 @@ function GlassUI:CreateWindow(opts)
 	shared.__GlassUI = GlassUI
 
 	local window = setmetatable({ tabs = {}, order = 0, toggleKey = opts.ToggleKey or Enum.KeyCode.RightShift }, Window)
-	active = { connections = {}, themed = {}, themeName = "dark", theme = THEMES.dark, visible = false, capturing = false }
+	active = { connections = {}, themed = {}, themeName = "dark", theme = THEMES.dark, visible = false, capturing = false, onDestroy = opts.OnDestroy }
 
 	local gui = create("ScreenGui", { Name = GUI_NAME, ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 1000, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, getGuiParent())
 	active.gui = gui
@@ -1218,6 +1219,9 @@ function GlassUI:Destroy()
 
 	table.clear(GlassUI.Flags)
 	if shared.__GlassUI == GlassUI then shared.__GlassUI = nil end
+
+	-- Lets the script that owns the window unload itself when the user presses Unload UI.
+	if owner.onDestroy then safeCall(owner.onDestroy) end
 end
 
 return GlassUI

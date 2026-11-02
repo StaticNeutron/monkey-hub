@@ -21,7 +21,7 @@ Script hub for **Survive a Million Monkeys** with a premium UI (hypercar intro, 
 
 ## Huss Valley Hub
 
-Auto Dodge (dashes out of catcher swings and tackles through the game's own dash), Auto Ability (Q), Immortal (best effort), Movement tweaks, Threat ESP and Anti-AFK. Catches are decided by the server, so Immortal cannot be true god mode; it dodges every committed hit it can see. **RightShift** opens and closes the menu. It uses `ui.lua` and downloads it automatically.
+Auto Dodge (dashes out of catcher swings and tackles through the game's own dash), Auto Ability (Q), Immortal (best effort), Movement tweaks, Threat ESP and Anti-AFK. Catches are decided by the server, so Immortal cannot be true god mode; it dodges every committed hit it can see. **RightShift** opens and closes the menu. The window is built with `GlassUI` (loaded from `glassui.lua` in your executor workspace if present, otherwise downloaded from this repo), and "Unload UI" in its Settings tab unloads the whole script.
 
 Movement tab (retunes the game's own movement profile, nothing is written into game memory):
 
@@ -36,7 +36,7 @@ The server watches movement; short tests of 2x dash rate, a 1.5x dash and +10% s
 
 ## GlassUI
 
-Translucent "glass" UI library with a stepper intro, glowing animated border, beat-pulse equalizer, blur-style tab transitions and a dark/light theme. Same API shape as `ui.lua`:
+Translucent "glass" UI library with a stepper intro, glowing animated border, beat-pulse equalizer, blur-style tab transitions and a dark/light theme. Same API shape as `ui.lua`, plus `OnDestroy` so a script can unload itself when its window is unloaded:
 
 ```lua
 local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/GlassUI.lua"))()

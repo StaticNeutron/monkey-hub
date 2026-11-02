@@ -4,6 +4,7 @@
 -- attributes, a dash goes through ChickenOrHero.Movement.BoostInput, catches themselves are server-side.
 -- Movement tweaks retune the game's own movement profile (MovementProfiles.get), so cooldown, recovery, distance and
 -- speed all flow through the game's formulas; nothing is written into game memory.
+-- UI: GlassUI (glassui.lua in the executor workspace, or the copy in the same GitHub repo).
 if not shared then return warn("No shared, no script.") end
 
 -- Singleton: replace a previous instance.
@@ -15,7 +16,8 @@ local HussValley = {}
 
 -- Constants.
 local PLACE_ID = 107535308163741
-local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/ui.lua"
+local UI_FILE = "glassui.lua"
+local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/GlassUI.lua"
 
 -- Per-game values. Each one comes from the decompiled client config named next to it.
 local CONFIG = {
@@ -72,6 +74,7 @@ local espTimer = 0
 local lastError = 0
 local alive = false
 local uiWindow = nil
+local detaching = false
 local guardTripped = false
 local lastRunStateAt = -10
 local resetCharacter = nil
@@ -657,25 +660,35 @@ local function setupAntiAfk()
 	end))
 end
 
--- Local ui.lua first, the public copy as fallback.
+-- Local glassui.lua first, the public copy as fallback.
 ---@return table
 local function loadLibrary()
 	local success, library = pcall(function()
-		local chunk = loadstring(readfile("ui.lua"))
+		local chunk = loadstring(readfile(UI_FILE))
 		return chunk and chunk()
 	end)
 	if success and type(library) == "table" then return library end
 
 	local response = request({ Url = UI_URL, Method = "GET" })
 	local chunk = loadstring(response.Body)
-	assert(chunk, "ui.lua failed to compile")
+	assert(chunk, "GlassUI failed to compile")
 	return chunk()
 end
 
 local function buildUi()
 	ui = loadLibrary()
-	local window = ui:CreateWindow({ Title = "Huss Valley", Subtitle = "Auto Dodge  /  Immortal  /  Movement", Intro = false })
+	local window = ui:CreateWindow({
+		Title = "Huss Valley",
+		Subtitle = "Auto Dodge  /  Immortal  /  Movement",
+		-- Pressing "Unload UI" in the window's Settings tab unloads the whole script, not just the window.
+		OnDestroy = function()
+			if not detaching then HussValley.detach() end
+		end,
+	})
 	uiWindow = window
+
+	-- A hub overlay should not blur the game while you play; the Settings tab can turn it back on.
+	ui.Flags.ui_blur.Set(false)
 
 	window:CreateCategory("Survival")
 	local combat = window:CreateTab("Combat")
@@ -768,6 +781,8 @@ function HussValley.init()
 end
 
 function HussValley.detach()
+	if detaching then return end
+	detaching = true
 	alive = false
 
 	for _, connection in connections do
