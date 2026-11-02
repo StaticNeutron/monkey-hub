@@ -28,6 +28,8 @@ local CONFIG = {
 	espRate = 0.25,
 	-- Attackers further than this (studs) cannot reach us before we can react.
 	vicinity = 45,
+	-- Catchers spend their Q ability when a runner is this close (studs).
+	catcherAbilityRange = 14,
 	-- A catcher can still turn up to ContactCatchConfig.WindupAimLimit (20 degrees) while winding up, so a swing's danger zone
 	-- widens with distance.
 	aimSlack = math.tan(math.rad(20)),
@@ -112,6 +114,10 @@ local movement = {
 	-- The game scales a dash by how fast you were already moving (Dash.ScaleDistanceWithSpeed), so a dash from a standstill
 	-- barely moves. This keeps it full length.
 	fullDash = false,
+	-- Reach top speed immediately instead of ramping up (Acceleration is made effectively infinite).
+	instantAccel = false,
+	-- Catchers have no dash in the game; this switches the dash on for them (they trigger it with catcherDashKey).
+	catcherDash = false,
 	speed = false,
 	-- Percent added on top of the live top speed, which itself moves with the round's balance buffs (about 37-42).
 	speedBoost = 5,
@@ -120,6 +126,8 @@ local movement = {
 	immortal = false,
 	immortalTweaks = true,
 	immortalDashTime = 15,
+	-- Immortal also spends the Q ability; turn this off to make it dash only.
+	immortalAbility = true,
 }
 
 -- What the movement wrapper applies right now: the user's own switches combined with the Immortal preset's.
@@ -132,6 +140,8 @@ local tuning = {
 	fastDash = false,
 	dashTime = 100,
 	fullDash = false,
+	instantAccel = false,
+	catcherDash = false,
 	speed = false,
 	boost = 5,
 }
@@ -150,6 +160,8 @@ local function refreshTuning()
 		tuning.dashTime = movement.dashTime
 	end
 	tuning.fullDash = movement.fullDash or forced
+	tuning.instantAccel = movement.instantAccel
+	tuning.catcherDash = movement.catcherDash
 	tuning.speed = movement.speed
 	tuning.boost = movement.speedBoost
 end
@@ -247,9 +259,17 @@ local function tuneProfile(profile)
 		clone.Acceleration = profile.Acceleration * factor
 	end
 
+	-- Top speed straight away: the game adds Acceleration * dt per frame, so a huge value reaches the cap in one frame.
+	if tuning.instantAccel and type(profile.MaxSpeed) == "number" then
+		clone.Acceleration = math.max(profile.Acceleration or 0, clone.MaxSpeed * 1000)
+	end
+
 	local dash = profile.Dash
-	if type(dash) == "table" and dash.Enabled then
+	local dashAvailable = type(dash) == "table" and (dash.Enabled or tuning.catcherDash)
+	if dashAvailable then
 		local tuned = table.clone(dash)
+		-- Catchers ship with the dash disabled; switch it on for them when asked.
+		if not dash.Enabled then tuned.Enabled = true end
 		if tuning.noCooldown then
 			tuned.Cooldown = math.min(dash.Cooldown, tuning.gap)
 			if tuning.skipRecovery then tuned.RecoveryDuration = 0 end
@@ -275,10 +295,10 @@ local function retunedProfile(role, player)
 	if player ~= localPlayer or type(profile) ~= "table" then return profile end
 
 	refreshTuning()
-	if not (tuning.noCooldown or tuning.longDash or tuning.fastDash or tuning.fullDash or tuning.speed) then return profile end
+	if not (tuning.noCooldown or tuning.longDash or tuning.fastDash or tuning.fullDash or tuning.instantAccel or tuning.catcherDash or tuning.speed) then return profile end
 
 	local success, result = pcall(function()
-		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%s|%.1f", tostring(tuning.noCooldown), tuning.gap, tostring(tuning.skipRecovery), tostring(tuning.longDash), tuning.scale, tostring(tuning.fastDash), tuning.dashTime, tostring(tuning.fullDash), tostring(tuning.speed), tuning.boost)
+		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%s|%s|%s|%.1f", tostring(tuning.noCooldown), tuning.gap, tostring(tuning.skipRecovery), tostring(tuning.longDash), tuning.scale, tostring(tuning.fastDash), tuning.dashTime, tostring(tuning.fullDash), tostring(tuning.instantAccel), tostring(tuning.catcherDash), tostring(tuning.speed), tuning.boost)
 		local variants = profileCache[profile]
 		if not variants then
 			variants = {}
@@ -355,6 +375,7 @@ local function restoreMovement()
 
 	movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
 	movement.skipAnimation, movement.immortal, movement.fullDash = false, false, false
+	movement.instantAccel, movement.catcherDash = false, false
 	movementProfiles, originalGet = nil, nil
 	table.clear(profileCache)
 end
@@ -395,6 +416,13 @@ end
 local function runnerActive()
 	return localPlayer:GetAttribute("InMatch") == true
 		and localPlayer:GetAttribute("GameRole") == "Runner"
+		and localPlayer:GetAttribute("RunState") == "Active"
+end
+
+---@return boolean
+local function catcherActive()
+	return localPlayer:GetAttribute("InMatch") == true
+		and localPlayer:GetAttribute("GameRole") == "Catcher"
 		and localPlayer:GetAttribute("RunState") == "Active"
 end
 
@@ -589,13 +617,39 @@ local function dashReady(character, now)
 	return ready
 end
 
+-- Catchers have no dash key of their own (Space is the tackle), so the hub triggers it. Needs the catcher dash switched on.
+local function requestCatcherDash()
+	if not (movement.catcherDash and boostInput and catcherActive()) then return end
+
+	boostInput.request()
+end
+
+-- Catcher counterpart of Auto Ability: spend the Q ability when a runner is within reach.
+---@param context table
+local function assistCatcher(context)
+	if not flag("autoAbility") or os.clock() - lastAbility < CONFIG.abilityLockout then return end
+
+	local position = context.root.Position
+	for _, participant in participants() do
+		if participant == localPlayer then continue end
+		if participant:GetAttribute("GameRole") ~= "Runner" or participant:GetAttribute("RunState") ~= "Active" then continue end
+
+		local character = participant.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if root and flat(root.Position - position).Magnitude <= CONFIG.catcherAbilityRange then
+			pressAbility()
+			return
+		end
+	end
+end
+
 -- Dashes out of every attack near us. State of an in-progress "standing still" prime lives in primeState.
 local primeState = nil
 
 ---@param context table
 local function react(context)
 	local dodgeOn = flag("autoDodge") or immortalOn()
-	local abilityOn = flag("autoAbility") or immortalOn()
+	local abilityOn = flag("autoAbility") or (immortalOn() and movement.immortalAbility)
 	if not dodgeOn and not abilityOn then
 		primeState = nil
 		return
@@ -705,7 +759,7 @@ end
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
 	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
-	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "speed", "immortalTweaks" } do
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "speed", "immortalTweaks" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -729,7 +783,20 @@ local function watchServerSnapBack(character)
 	lastReset = reset
 
 	local forced = movement.immortal and movement.immortalTweaks
-	if not (movement.fastDash or forced) or os.clock() - lastRunStateAt < 1.5 then return end
+	if not (movement.fastDash or forced or movement.instantAccel or movement.catcherDash) or os.clock() - lastRunStateAt < 1.5 then return end
+
+	-- No dash-time knob in play: the snap-back can only come from the acceleration or catcher-dash switches, so withdraw them.
+	if not (movement.fastDash or forced) then
+		for _, name in { "instantAccel", "catcherDash" } do
+			local entry = ui and ui.Flags[name]
+			if entry and entry.Value == true then entry.Set(false) end
+		end
+		log("server snapped us back; instant acceleration / catcher dash switched off")
+		if uiWindow then
+			uiWindow:Notify({ Title = "Switched off", Text = "The server snapped you back, so instant acceleration and the catcher dash were turned off.", Duration = 6 })
+		end
+		return
+	end
 
 	-- Slow whichever fast dash is in force: the user's own slider and/or the Immortal preset's dash time.
 	local slower = 0
@@ -784,9 +851,12 @@ local function step(deltaTime)
 		clearSteer()
 	end
 
-	if not runnerActive() then return end
-
-	react({ character = character, humanoid = humanoid, root = root })
+	local context = { character = character, humanoid = humanoid, root = root }
+	if runnerActive() then
+		react(context)
+	elseif catcherActive() then
+		assistCatcher(context)
+	end
 end
 
 local function setupAntiAfk()
@@ -841,12 +911,13 @@ local function buildUi()
 	local combat = window:CreateTab("Combat")
 	combat:AddSection("Dodge")
 	combat:AddToggle({ Text = "Auto Dodge", Default = false, Flag = "autoDodge" })
-	combat:AddToggle({ Text = "Auto Ability (Q) when dash is spent", Default = false, Flag = "autoAbility" })
+	combat:AddToggle({ Text = "Auto Ability (Q): runners when the dash is spent, catchers when a runner is close", Default = false, Flag = "autoAbility" })
 	combat:AddToggle({ Text = "React to tracking catchers", Default = false, Flag = "early" })
 	combat:AddSlider({ Text = "Danger margin (studs)", Min = 0, Max = 4, Default = 0, Increment = 0.5, Flag = "margin" })
 	combat:AddSection("Immortal")
 	combat:AddToggle({ Text = "Immortal (best effort)", Default = false, Flag = "immortal", Callback = function(on) movement.immortal = on end })
 	combat:AddToggle({ Text = "Immortal: no cooldown + fastest dash", Default = true, Flag = "immortalTweaks", Callback = function(on) movement.immortalTweaks = on end })
+	combat:AddToggle({ Text = "Immortal: also use abilities (Q)", Default = true, Flag = "immortalAbility", Callback = function(on) movement.immortalAbility = on end })
 	combat:AddLabel("Dashes out of every attack near you from any side, even two at once, with no dash cooldown and the fastest dash the server accepts (about 0.04 s). Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow.")
 
 	window:CreateCategory("Movement")
@@ -865,8 +936,13 @@ local function buildUi()
 	move:AddLabel("15% is the fastest the server accepted in testing. Truly instant (0%) gets you snapped back, so the slider stops at 15%; if a snap-back still happens the dash time is raised for you.")
 	move:AddToggle({ Text = "Skip dash animation", Default = false, Flag = "skipAnimation", Callback = function(on) movement.skipAnimation = on end })
 	move:AddSection("Speed")
+	move:AddToggle({ Text = "Instant acceleration", Default = false, Flag = "instantAccel", Callback = function(on) movement.instantAccel = on end })
 	move:AddToggle({ Text = "Speed tuning", Default = false, Flag = "speed", Callback = function(on) movement.speed = on end })
 	move:AddSlider({ Text = "Speed boost (%)", Min = 0, Max = 25, Default = 5, Increment = 1, Flag = "speedBoost", Callback = function(value) movement.speedBoost = value end })
+	move:AddSection("Catcher")
+	move:AddToggle({ Text = "Catcher: enable dash", Default = false, Flag = "catcherDash", Callback = function(on) movement.catcherDash = on end })
+	move:AddKeybind({ Text = "Catcher dash key", Default = Enum.KeyCode.LeftShift, Flag = "catcherDashKey", Pressed = function() requestCatcherDash() end })
+	move:AddLabel("Catchers have no dash in the game. This turns it on for them (every dash option above then applies). Hold a direction, turn at least 35 degrees away from where you are running, and press the key. Auto Ability (Q) also fires for catchers when a runner is close.")
 	move:AddSection("Safety")
 	move:AddToggle({ Text = "Auto-off on a fair-play warning", Default = true, Flag = "guardStop" })
 	move:AddLabel("The server watches movement. Short tests of no cooldown, a 1.5x dash and +10% speed drew no warning, but the further you push past the game's own numbers the more likely one gets. If it warns you, these switch themselves off.")
@@ -903,6 +979,7 @@ function HussValley.init()
 
 		movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
 		movement.fullDash, movement.immortalTweaks = false, false
+		movement.instantAccel, movement.catcherDash = false, false
 		guardTripped = true
 		log("fair-play warning: movement tweaks off")
 	end))
