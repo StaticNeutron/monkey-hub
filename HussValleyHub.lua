@@ -83,6 +83,7 @@ local highlights = {}
 local ui = nil
 local guiParent = nil
 local boostInput = nil
+local tacklePrediction = nil
 local participantDirectory = nil
 local lastDash = 0
 local lastAbility = 0
@@ -97,6 +98,7 @@ local guardTripped = false
 local lastRunStateAt = -10
 local resetCharacter = nil
 local lastReset = nil
+local pendingReset = nil
 
 -- Live movement switches. The profile wrapper reads this every frame; the UI callbacks write to it.
 local movement = {
@@ -116,7 +118,7 @@ local movement = {
 	fullDash = false,
 	-- Reach top speed immediately instead of ramping up (Acceleration is made effectively infinite).
 	instantAccel = false,
-	-- Catchers have no dash in the game; this switches the dash on for them (they trigger it with catcherDashKey).
+	-- Catchers have no runner dash; their own dash is the tackle. With this on, catcherDashKey fires that tackle.
 	catcherDash = false,
 	-- Dash wherever you point it without turning away from your current direction first (the game normally refuses a dash
 	-- unless it is at least 35 degrees away from where you were just travelling), including straight ahead.
@@ -274,11 +276,9 @@ local function tuneProfile(profile)
 	end
 
 	local dash = profile.Dash
-	local dashAvailable = type(dash) == "table" and (dash.Enabled or tuning.catcherDash)
+	local dashAvailable = type(dash) == "table" and dash.Enabled
 	if dashAvailable then
 		local tuned = table.clone(dash)
-		-- Catchers ship with the dash disabled; switch it on for them when asked.
-		if not dash.Enabled then tuned.Enabled = true end
 		if tuning.noCooldown then
 			tuned.Cooldown = math.min(dash.Cooldown, tuning.gap)
 			if tuning.skipRecovery then tuned.RecoveryDuration = 0 end
@@ -693,11 +693,27 @@ local function dashReady(character, now)
 	return ready
 end
 
--- Catchers have no dash key of their own (Space is the tackle), so the hub triggers it. Needs the catcher dash switched on.
+-- The catcher's own dash is the tackle (the game's Space / E / F). This fires it from the catcher dash key, facing the
+-- chosen direction first when free-direction dash is on. The game still applies its own readiness and cooldown rules.
 local function requestCatcherDash()
-	if not (movement.catcherDash and boostInput and catcherActive()) then return end
+	if not (movement.catcherDash and tacklePrediction and catcherActive()) then return end
 
-	boostInput.request()
+	pcall(function()
+		local character = localPlayer.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		if not root then return end
+
+		if movement.freeDash then
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+			local keys = humanoid and humanoid.MoveDirection or Vector3.zero
+			if hookState.steer ~= nil and os.clock() < hookState.expiresAt then keys = hookState.steer end
+			local direction = chooseDashDirection(keys)
+			if direction then root.CFrame = CFrame.lookAt(root.Position, root.Position + direction) end
+		end
+
+		tacklePrediction.request()
+	end)
+	setthreadidentity(8)
 end
 
 -- Catcher counterpart of Auto Ability: spend the Q ability when a runner is within reach.
@@ -855,21 +871,34 @@ local function watchServerSnapBack(character)
 		return
 	end
 
-	if reset == lastReset then return end
-	lastReset = reset
+	if reset ~= lastReset then
+		lastReset = reset
+		pendingReset = os.clock()
+	end
+
+	-- Judge a reset only after a short delay: the server often moves us a moment before the round-state change that
+	-- explains it (round end, caught, safe, respawn, teleport to the lobby).
+	if not pendingReset or os.clock() - pendingReset < 0.8 then return end
+
+	local resetAt = pendingReset
+	pendingReset = nil
+
+	-- Only a snap-back during a live match counts: we are Active now, and nothing changed state around the reset.
+	if localPlayer:GetAttribute("RunState") ~= "Active" or character:GetAttribute("MovementLocked") then return end
+	if lastRunStateAt > resetAt - 2.5 or os.clock() - lastRunStateAt < 3 then return end
 
 	local forced = movement.immortal and movement.immortalTweaks
-	if not (movement.fastDash or forced or movement.instantAccel or movement.catcherDash or movement.freeDash) or os.clock() - lastRunStateAt < 1.5 then return end
+	if not (movement.fastDash or forced or movement.instantAccel or movement.freeDash) then return end
 
 	-- No dash-time knob in play: the snap-back can only come from the acceleration or catcher-dash switches, so withdraw them.
 	if not (movement.fastDash or forced) then
-		for _, name in { "instantAccel", "catcherDash", "freeDash" } do
+		for _, name in { "instantAccel", "freeDash" } do
 			local entry = ui and ui.Flags[name]
 			if entry and entry.Value == true then entry.Set(false) end
 		end
-		log("server snapped us back; instant acceleration / catcher dash switched off")
+		log("server snapped us back; instant acceleration / free-direction dash switched off")
 		if uiWindow then
-			uiWindow:Notify({ Title = "Switched off", Text = "The server snapped you back, so instant acceleration and the catcher dash were turned off.", Duration = 6 })
+			uiWindow:Notify({ Title = "Switched off", Text = "The server snapped you back, so instant acceleration and free-direction dash were turned off.", Duration = 6 })
 		end
 		return
 	end
@@ -1020,9 +1049,9 @@ local function buildUi()
 	move:AddToggle({ Text = "Speed tuning", Default = false, Flag = "speed", Callback = function(on) movement.speed = on end })
 	move:AddSlider({ Text = "Speed boost (%)", Min = 0, Max = 25, Default = 5, Increment = 1, Flag = "speedBoost", Callback = function(value) movement.speedBoost = value end })
 	move:AddSection("Catcher")
-	move:AddToggle({ Text = "Catcher: enable dash", Default = false, Flag = "catcherDash", Callback = function(on) movement.catcherDash = on end })
+	move:AddToggle({ Text = "Catcher: dash key uses the tackle", Default = false, Flag = "catcherDash", Callback = function(on) movement.catcherDash = on end })
 	move:AddKeybind({ Text = "Catcher dash key", Default = Enum.KeyCode.LeftShift, Flag = "catcherDashKey", Pressed = function() requestCatcherDash() end })
-	move:AddLabel("Catchers have no dash in the game. This turns it on for them (every dash option above then applies). Hold a direction, turn at least 35 degrees away from where you are running, and press the key. Auto Ability (Q) also fires for catchers when a runner is close.")
+	move:AddLabel("A catcher's own dash is the tackle, not the runner dash. This binds it to the key below (the game's cooldown still applies). With free-direction dash on it also turns you toward the direction you picked first. Auto Ability (Q) also fires for catchers when a runner is close.")
 	move:AddSection("Safety")
 	move:AddToggle({ Text = "Auto-off on a fair-play warning", Default = true, Flag = "guardStop" })
 	move:AddLabel("The server watches movement. Short tests of no cooldown, a 1.5x dash and +10% speed drew no warning, but the further you push past the game's own numbers the more likely one gets. If it warns you, these switch themselves off.")
@@ -1044,6 +1073,9 @@ function HussValley.init()
 
 	local movementFolder = replicatedStorage:WaitForChild("ChickenOrHero"):WaitForChild("Movement")
 	boostInput = loadModule(movementFolder:WaitForChild("BoostInput"))
+	tacklePrediction = loadModule(replicatedStorage.ChickenOrHero:WaitForChild("Game"):WaitForChild("TacklePrediction"))
+	if tacklePrediction and type(tacklePrediction.request) ~= "function" then tacklePrediction = nil end
+	setthreadidentity(8)
 	participantDirectory = loadModule(replicatedStorage.ChickenOrHero:WaitForChild("Presentation"):WaitForChild("ParticipantDirectory"))
 
 	guiParent = resolveGuiParent()
@@ -1077,6 +1109,10 @@ function HussValley.init()
 
 	-- Round-state changes (caught, safe, new round) legitimately reset movement; remember when one just happened.
 	table.insert(connections, localPlayer:GetAttributeChangedSignal("RunState"):Connect(function()
+		lastRunStateAt = os.clock()
+	end))
+
+	table.insert(connections, localPlayer:GetAttributeChangedSignal("GameRole"):Connect(function()
 		lastRunStateAt = os.clock()
 	end))
 
