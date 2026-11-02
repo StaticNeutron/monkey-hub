@@ -1103,6 +1103,79 @@ local function loadLibrary()
 	return chunk()
 end
 
+local CONFIG_FOLDER = "HussValley/configs"
+local AUTOLOAD_FILE = "HussValley/autoload.txt"
+
+-- Disk file for a config slot such as "Config 1".
+---@param slot string
+---@return string
+local function configPath(slot)
+	local name = string.gsub(string.lower(slot), "%s+", "_")
+	return CONFIG_FOLDER .. "/" .. name .. ".json"
+end
+
+local function notify(title, text)
+	if uiWindow then uiWindow:Notify({ Title = title, Text = text, Duration = 4 }) end
+end
+
+-- Writes every saved-able switch, slider, dropdown and keybind of the window to the slot. The config controls
+-- themselves (flags starting with cfg_) are left out.
+---@param slot string
+local function saveConfig(slot)
+	local data = {}
+	for name, entry in ui.Flags do
+		if string.sub(name, 1, 4) == "cfg_" then continue end
+
+		local value = entry.Value
+		if typeof(value) == "EnumItem" then value = value.Name end
+		if type(value) == "boolean" or type(value) == "number" or type(value) == "string" then data[name] = value end
+	end
+
+	local success, failure = pcall(function()
+		if not isfolder("HussValley") then makefolder("HussValley") end
+		if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+		writefile(configPath(slot), game:GetService("HttpService"):JSONEncode(data))
+	end)
+
+	if success then
+		notify("Config saved", slot)
+	else
+		notify("Could not save", tostring(failure))
+	end
+end
+
+---@param slot string
+---@param quiet boolean?
+local function loadConfig(slot, quiet)
+	local path = configPath(slot)
+	local success, data = pcall(function()
+		if not isfile(path) then return nil end
+
+		return game:GetService("HttpService"):JSONDecode(readfile(path))
+	end)
+
+	if not success or type(data) ~= "table" then
+		if not quiet then notify("No config", slot .. " has nothing saved yet") end
+		return
+	end
+
+	local applied = 0
+	for name, value in data do
+		local entry = ui.Flags[name]
+		if entry and string.sub(name, 1, 4) ~= "cfg_" and pcall(entry.Set, value) then applied += 1 end
+	end
+
+	if not quiet then notify("Config loaded", string.format("%s (%d settings)", slot, applied)) end
+end
+
+---@param slot string
+local function deleteConfig(slot)
+	local success = pcall(function()
+		if isfile(configPath(slot)) then delfile(configPath(slot)) end
+	end)
+	notify(success and "Config deleted" or "Could not delete", slot)
+end
+
 local function buildUi()
 	ui = loadLibrary()
 	local window = ui:CreateWindow({
@@ -1181,6 +1254,30 @@ local function buildUi()
 	visuals:AddToggle({ Text = "Threat ESP", Default = false, Flag = "esp" })
 	local misc = window:CreateTab("Misc")
 	misc:AddToggle({ Text = "Anti-AFK", Default = true, Flag = "antiAfk" })
+
+	-- Config section in the built-in Settings tab (older GlassUI copies without it get it under Misc).
+	local settingsTab = window.Settings or misc
+	settingsTab:AddSection("Configs")
+	settingsTab:AddDropdown({ Text = "Config slot", Options = { "Config 1", "Config 2", "Config 3", "Config 4", "Config 5" }, Default = "Config 1", Flag = "cfg_slot" })
+	settingsTab:AddButton({ Text = "Save config", Callback = function() saveConfig(ui.Flags.cfg_slot.Value) end })
+	settingsTab:AddButton({ Text = "Load config", Callback = function() loadConfig(ui.Flags.cfg_slot.Value) end })
+	settingsTab:AddButton({ Text = "Delete config", Callback = function() deleteConfig(ui.Flags.cfg_slot.Value) end })
+	settingsTab:AddToggle({
+		Text = "Load this config when the script starts",
+		Default = false,
+		Flag = "cfg_autoload",
+		Callback = function(on)
+			pcall(function()
+				if not isfolder("HussValley") then makefolder("HussValley") end
+				if on then
+					writefile(AUTOLOAD_FILE, ui.Flags.cfg_slot.Value)
+				elseif isfile(AUTOLOAD_FILE) then
+					delfile(AUTOLOAD_FILE)
+				end
+			end)
+		end,
+	})
+	settingsTab:AddLabel("Saves every switch, slider, dropdown and keybind to a file in your executor workspace (HussValley/configs). Pick a slot, then save or load it.")
 
 	window:Notify({ Title = "Huss Valley", Text = "RightShift toggles the menu", Duration = 4 })
 end
@@ -1267,6 +1364,19 @@ function HussValley.init()
 	table.insert(connections, localPlayer:GetAttributeChangedSignal("GameRole"):Connect(function()
 		lastRunStateAt = os.clock()
 	end))
+
+	-- Auto-load: restore the slot the player chose to start with.
+	task.spawn(function()
+		local success, slot = pcall(function()
+			if isfile(AUTOLOAD_FILE) then return readfile(AUTOLOAD_FILE) end
+		end)
+		if not (success and type(slot) == "string" and ui and ui.Flags.cfg_slot) then return end
+
+		setthreadidentity(8)
+		pcall(ui.Flags.cfg_slot.Set, slot)
+		loadConfig(slot, true)
+		pcall(ui.Flags.cfg_autoload.Set, true)
+	end)
 
 	-- Never carry a steer across a respawn.
 	table.insert(connections, localPlayer.CharacterAdded:Connect(function()

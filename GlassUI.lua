@@ -1183,7 +1183,7 @@ function GlassUI:CreateWindow(opts)
 	})
 	settings:AddSection("Session")
 	settings:AddButton({
-		Text = "Unload UI",
+		Text = "Unload Script",
 		Callback = function()
 			task.defer(function()
 				GlassUI:Destroy()
@@ -1192,6 +1192,8 @@ function GlassUI:CreateWindow(opts)
 	})
 
 	active.window = window
+	-- Lets the script that owns the window add its own sections (such as configs) to the built-in Settings tab.
+	window.Settings = settings
 
 	if opts.Intro == false then
 		task.defer(function()
@@ -1220,7 +1222,7 @@ function GlassUI:Destroy()
 	table.clear(GlassUI.Flags)
 	if shared.__GlassUI == GlassUI then shared.__GlassUI = nil end
 
-	-- Lets the script that owns the window unload itself when the user presses Unload UI.
+	-- Lets the script that owns the window unload itself when the user presses Unload Script.
 	if owner.onDestroy then safeCall(owner.onDestroy) end
 end
 
