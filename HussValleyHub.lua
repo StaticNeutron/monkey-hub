@@ -123,6 +123,8 @@ local movement = {
 	-- Dash wherever you point it without turning away from your current direction first (the game normally refuses a dash
 	-- unless it is at least 35 degrees away from where you were just travelling), including straight ahead.
 	freeDash = false,
+	-- Dash at any moment: a new dash cancels the one still playing (and its recovery and cooldown), so nothing locks you out.
+	dashAnytime = false,
 	-- Which way a free dash goes: the keys you are holding, the camera, or the way the character faces.
 	dashDirection = "Movement keys",
 	speed = false,
@@ -386,13 +388,24 @@ end
 -- travelling the opposite way, plus the direction we picked as the input, so the game's own rule is satisfied.
 -- Anything that is not a live dash request passes straight through untouched.
 local function freeDashStep(model, moveDirection, speed, dt, profile, grounded, a, b, request, velocity, touch)
-	if request == true and movementModel and (movement.freeDash or (movement.immortal and movement.immortalTweaks)) then
+	local forcedFree = movement.freeDash or (movement.immortal and movement.immortalTweaks)
+	if request == true and movementModel and (forcedFree or movement.dashAnytime) then
 		pcall(function()
 			if type(profile) ~= "table" or type(profile.Dash) ~= "table" or not profile.Dash.Enabled then return end
-			if not movementModel.canBoost(model, profile, grounded ~= false) then return end
 
 			local direction = chooseDashDirection(moveDirection)
 			if not direction then return end
+
+			-- Dash anytime: end the dash that is still playing so the game treats us as free to dash again. The cancelled
+			-- dash leaves no travel history, so the redirect trick below is needed for the new one.
+			local cancelled = false
+			if movement.dashAnytime and grounded ~= false and (model.dashRemaining > 0 or model.recoveryRemaining > 0 or model.cooldown > 0) then
+				model.dashRemaining, model.recoveryRemaining, model.cooldown = 0, 0, 0
+				cancelled = true
+			end
+
+			if not movementModel.canBoost(model, profile, grounded ~= false) then return end
+			if not (forcedFree or cancelled) then return end
 
 			-- Full entry speed so the dash keeps its full length even from a standstill.
 			table.insert(model.travelHistory, { at = model.travelClock, direction = -direction, speed = profile.MaxSpeed })
@@ -452,6 +465,7 @@ local function restoreMovement()
 	movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
 	movement.skipAnimation, movement.immortal, movement.fullDash = false, false, false
 	movement.instantAccel, movement.catcherDash, movement.freeDash = false, false, false
+	movement.dashAnytime = false
 	movementProfiles, originalGet = nil, nil
 	table.clear(profileCache)
 end
@@ -686,7 +700,7 @@ local function dashReady(character, now)
 
 	refreshTuning()
 	local seconds = CONFIG.dashDuration * (tuning.fastDash and tuning.dashTime / 100 or 1)
-	local settled = tuning.noCooldown and now - lastDash >= seconds + CONFIG.dashSettle
+	local settled = movement.dashAnytime or (tuning.noCooldown and now - lastDash >= seconds + CONFIG.dashSettle)
 	local ready = (character:GetAttribute("DashReady") == true or settled) and boostInput.available(localPlayer)
 	setthreadidentity(8)
 
@@ -851,7 +865,7 @@ end
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
 	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
-	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "speed", "immortalTweaks" } do
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "speed", "immortalTweaks" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -888,11 +902,11 @@ local function watchServerSnapBack(character)
 	if lastRunStateAt > resetAt - 2.5 or os.clock() - lastRunStateAt < 3 then return end
 
 	local forced = movement.immortal and movement.immortalTweaks
-	if not (movement.fastDash or forced or movement.instantAccel or movement.freeDash) then return end
+	if not (movement.fastDash or forced or movement.instantAccel or movement.freeDash or movement.dashAnytime) then return end
 
 	-- No dash-time knob in play: the snap-back can only come from the acceleration or catcher-dash switches, so withdraw them.
 	if not (movement.fastDash or forced) then
-		for _, name in { "instantAccel", "freeDash" } do
+		for _, name in { "instantAccel", "freeDash", "dashAnytime" } do
 			local entry = ui and ui.Flags[name]
 			if entry and entry.Value == true then entry.Set(false) end
 		end
@@ -1034,6 +1048,9 @@ local function buildUi()
 	move:AddSection("Dash distance")
 	move:AddToggle({ Text = "Longer dash", Default = false, Flag = "longDash", Callback = function(on) movement.longDash = on end })
 	move:AddSlider({ Text = "Distance multiplier", Min = 1.1, Max = 3, Default = 1.5, Increment = 0.1, Flag = "dashScale", Callback = function(value) movement.dashScale = value end })
+	move:AddSection("Dash anytime")
+	move:AddToggle({ Text = "No stun: dash during another dash", Default = false, Flag = "dashAnytime", Callback = function(on) movement.dashAnytime = on end })
+	move:AddLabel("A new dash cancels the one still playing (and its recovery and cooldown), for runners and for catchers with a dash. Chain dashes as fast as you press the key.")
 	move:AddSection("Dash direction")
 	move:AddToggle({ Text = "Free-direction dash (no turning, dash forward too)", Default = false, Flag = "freeDash", Callback = function(on) movement.freeDash = on end })
 	move:AddDropdown({ Text = "Dash toward", Options = { "Movement keys", "Camera", "Character facing" }, Default = "Movement keys", Flag = "dashDirection", Callback = function(value) movement.dashDirection = value end })
