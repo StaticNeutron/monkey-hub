@@ -1,6 +1,9 @@
--- Huss Valley hub: Auto Dodge, Auto Ability, Immortal (best effort), Threat ESP, Anti-AFK.
+-- Huss Valley hub: Auto Dodge, Auto Ability, Immortal (best effort), Movement (no dash cooldown, longer dash, speed),
+-- Threat ESP, Anti-AFK.
 -- Verified against place 107535308163741 (v507): catcher swings/tackles are visible as character
 -- attributes, a dash goes through ChickenOrHero.Movement.BoostInput, catches themselves are server-side.
+-- Movement tweaks retune the game's own movement profile (MovementProfiles.get), so cooldown, recovery, distance and
+-- speed all flow through the game's formulas; nothing is written into game memory.
 if not shared then return warn("No shared, no script.") end
 
 -- Singleton: replace a previous instance.
@@ -33,6 +36,8 @@ local CONFIG = {
 	-- How long the steered MoveDirection stays active; the game reads it once per frame.
 	steerHold = 0.12,
 	dashLockout = 0.3,
+	-- Re-dodge gap while the dash cooldown is removed: a dash lasts 0.28s, so this only waits for it to finish.
+	fastDashLockout = 0.12,
 	abilityLockout = 1,
 	-- MovementProfiles Runner Dash: MinIntentAngle 35, ~10.9 studs.
 	minIntentCos = math.cos(math.rad(35)),
@@ -66,6 +71,24 @@ local tickTimer = 0
 local espTimer = 0
 local lastError = 0
 local alive = false
+local uiWindow = nil
+local guardTripped = false
+
+-- Live movement switches. The profile wrapper reads this every frame; the UI callbacks write to it.
+local movement = {
+	noCooldown = false,
+	-- Seconds the dash cooldown is capped at while noCooldown is on (0 = none).
+	cooldownGap = 0,
+	skipRecovery = true,
+	longDash = false,
+	dashScale = 1.5,
+	speed = false,
+	-- Percent added on top of the live top speed, which itself moves with the round's balance buffs (about 37-42).
+	speedBoost = 5,
+}
+local movementProfiles = nil
+local originalGet = nil
+local profileCache = setmetatable({}, { __mode = "k" })
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.RespectCanCollide = true
@@ -139,6 +162,101 @@ local function loadModule(path)
 	end
 
 	return result
+end
+
+-- Builds the retuned copy of a movement profile. Cooldown/Recovery/Distance live in profile.Dash and are consumed by
+-- the game's own MovementModel when a dash starts, so changing them here is all the game needs.
+---@param profile table
+---@return table
+local function tuneProfile(profile)
+	local clone = table.clone(profile)
+
+	if movement.speed and type(profile.MaxSpeed) == "number" and profile.MaxSpeed > 0 then
+		local factor = 1 + movement.speedBoost / 100
+		clone.MaxSpeed = profile.MaxSpeed * factor
+		-- Scale acceleration with it so the new top speed is reached in the time the game intended.
+		clone.Acceleration = profile.Acceleration * factor
+	end
+
+	local dash = profile.Dash
+	if type(dash) == "table" and dash.Enabled then
+		local tuned = table.clone(dash)
+		if movement.noCooldown then
+			tuned.Cooldown = math.min(dash.Cooldown, movement.cooldownGap)
+			if movement.skipRecovery then tuned.RecoveryDuration = 0 end
+		end
+		if movement.longDash then tuned.Distance = dash.Distance * movement.dashScale end
+		clone.Dash = table.freeze(tuned)
+	end
+
+	return table.freeze(clone)
+end
+
+-- Replacement for MovementProfiles.get. It runs inside the game's per-frame movement code, so any failure falls back
+-- to the untouched profile instead of breaking movement. The same clone is returned every frame (the game compares
+-- profiles by reference and resets the dash state when it changes).
+---@param role string
+---@param player Instance
+---@return table
+local function retunedProfile(role, player)
+	local profile = originalGet(role, player)
+	if player ~= localPlayer or type(profile) ~= "table" then return profile end
+	if not (movement.noCooldown or movement.longDash or movement.speed) then return profile end
+
+	local success, result = pcall(function()
+		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.1f", tostring(movement.noCooldown), movement.cooldownGap, tostring(movement.skipRecovery), tostring(movement.longDash), movement.dashScale, tostring(movement.speed), movement.speedBoost)
+		local variants = profileCache[profile]
+		if not variants then
+			variants = {}
+			profileCache[profile] = variants
+		end
+
+		local cached = variants[signature]
+		if not cached then
+			cached = tuneProfile(profile)
+			variants[signature] = cached
+		end
+
+		return cached
+	end)
+
+	return success and result or profile
+end
+
+local function installMovement()
+	local folder = replicatedStorage:WaitForChild("ChickenOrHero"):WaitForChild("Movement")
+	movementProfiles = loadModule(folder:WaitForChild("MovementProfiles"))
+	if not movementProfiles or type(movementProfiles.get) ~= "function" then
+		warn("[HV] MovementProfiles unavailable; movement tweaks are disabled")
+		movementProfiles = nil
+		return
+	end
+
+	-- The module table is frozen; unfreeze it just long enough to swap the function, then freeze it again.
+	originalGet = movementProfiles.get
+	local patched = pcall(function()
+		setreadonly(movementProfiles, false)
+		movementProfiles.get = retunedProfile
+		setreadonly(movementProfiles, true)
+	end)
+	if not patched then
+		warn("[HV] could not patch MovementProfiles; movement tweaks are disabled")
+		movementProfiles, originalGet = nil, nil
+	end
+end
+
+local function restoreMovement()
+	if movementProfiles and movementProfiles.get == retunedProfile then
+		pcall(function()
+			setreadonly(movementProfiles, false)
+			movementProfiles.get = originalGet
+			setreadonly(movementProfiles, true)
+		end)
+	end
+
+	movement.noCooldown, movement.longDash, movement.speed = false, false, false
+	movementProfiles, originalGet = nil, nil
+	table.clear(profileCache)
 end
 
 ---@param name string
@@ -343,7 +461,8 @@ local function react(context)
 
 	log("threat", threat.kind, threat.catcher, "dashReady", dashReady, "sinceDash", string.format("%.2f", now - lastDash))
 
-	if dodgeOn and dashReady and now - lastDash >= CONFIG.dashLockout then
+	local lockout = movement.noCooldown and CONFIG.fastDashLockout or CONFIG.dashLockout
+	if dodgeOn and dashReady and now - lastDash >= lockout then
 		local velocity = context.root.AssemblyLinearVelocity
 		local direction = pickEvasion(threat, context.character, context.root.Position, velocity)
 		lastDash = now
@@ -406,8 +525,25 @@ local function updateEsp()
 	end
 end
 
+-- The game's fair-play system warned us: put every movement tweak back to normal and say so.
+local function stopRiskyMovement()
+	for _, name in { "noCooldown", "longDash", "speed" } do
+		local entry = ui and ui.Flags[name]
+		if entry and entry.Value == true then entry.Set(false) end
+	end
+
+	if uiWindow then
+		uiWindow:Notify({ Title = "Fair-play warning", Text = "Movement tweaks were switched off automatically.", Duration = 8 })
+	end
+end
+
 ---@param deltaTime number
 local function step(deltaTime)
+	if guardTripped then
+		guardTripped = false
+		stopRiskyMovement()
+	end
+
 	tickTimer = tickTimer + deltaTime
 	espTimer = espTimer + deltaTime
 
@@ -475,7 +611,8 @@ end
 
 local function buildUi()
 	ui = loadLibrary()
-	local window = ui:CreateWindow({ Title = "Huss Valley", Subtitle = "Auto Dodge  /  Immortal", Intro = false })
+	local window = ui:CreateWindow({ Title = "Huss Valley", Subtitle = "Auto Dodge  /  Immortal  /  Movement", Intro = false })
+	uiWindow = window
 
 	window:CreateCategory("Survival")
 	local combat = window:CreateTab("Combat")
@@ -487,6 +624,22 @@ local function buildUi()
 	combat:AddSection("Immortal")
 	combat:AddToggle({ Text = "Immortal (best effort)", Default = false, Flag = "immortal" })
 	combat:AddLabel("Catches are decided by the server, so this cannot give true god mode. It dashes out of every attack it can see and spends your Q ability.")
+
+	window:CreateCategory("Movement")
+	local move = window:CreateTab("Movement")
+	move:AddSection("Dash cooldown")
+	move:AddToggle({ Text = "No dash cooldown", Default = false, Flag = "noCooldown", Callback = function(on) movement.noCooldown = on end })
+	move:AddSlider({ Text = "Cooldown cap (s, 0 = none)", Min = 0, Max = 0.7, Default = 0, Increment = 0.05, Flag = "cooldownGap", Callback = function(value) movement.cooldownGap = value end })
+	move:AddToggle({ Text = "Skip dash recovery", Default = true, Flag = "skipRecovery", Callback = function(on) movement.skipRecovery = on end })
+	move:AddSection("Dash distance")
+	move:AddToggle({ Text = "Longer dash", Default = false, Flag = "longDash", Callback = function(on) movement.longDash = on end })
+	move:AddSlider({ Text = "Distance multiplier", Min = 1.1, Max = 3, Default = 1.5, Increment = 0.1, Flag = "dashScale", Callback = function(value) movement.dashScale = value end })
+	move:AddSection("Speed")
+	move:AddToggle({ Text = "Speed tuning", Default = false, Flag = "speed", Callback = function(on) movement.speed = on end })
+	move:AddSlider({ Text = "Speed boost (%)", Min = 0, Max = 25, Default = 5, Increment = 1, Flag = "speedBoost", Callback = function(value) movement.speedBoost = value end })
+	move:AddSection("Safety")
+	move:AddToggle({ Text = "Auto-off on a fair-play warning", Default = true, Flag = "guardStop" })
+	move:AddLabel("The server watches movement. Short tests of no cooldown, a 1.5x dash and +10% speed drew no warning, but the further you push past the game's own numbers the more likely one gets. If it warns you, these switch themselves off.")
 
 	window:CreateCategory("Utility")
 	local visuals = window:CreateTab("Visuals")
@@ -503,13 +656,25 @@ function HussValley.init()
 		return
 	end
 
-	local movement = replicatedStorage:WaitForChild("ChickenOrHero"):WaitForChild("Movement")
-	boostInput = loadModule(movement:WaitForChild("BoostInput"))
+	local movementFolder = replicatedStorage:WaitForChild("ChickenOrHero"):WaitForChild("Movement")
+	boostInput = loadModule(movementFolder:WaitForChild("BoostInput"))
 	participantDirectory = loadModule(replicatedStorage.ChickenOrHero:WaitForChild("Presentation"):WaitForChild("ParticipantDirectory"))
 
 	guiParent = resolveGuiParent()
 	buildUi()
 	setupAntiAfk()
+	installMovement()
+
+	-- The server's fair-play system announces a warning on this remote; flag it for the main loop to act on.
+	-- Plain table writes only: this callback starts at a low thread identity and must not touch the UI.
+	local guardEvent = replicatedStorage.ChickenOrHero:WaitForChild("Presentation"):WaitForChild("MovementGuardEvent")
+	table.insert(connections, guardEvent.OnClientEvent:Connect(function(kind)
+		if kind ~= "Warning" or not flag("guardStop") then return end
+
+		movement.noCooldown, movement.longDash, movement.speed = false, false, false
+		guardTripped = true
+		log("fair-play warning: movement tweaks off")
+	end))
 
 	-- Signal callbacks start at a low thread identity; SendKeyEvent and the hidden UI container need 8.
 	-- A spawned loop (not a Connect callback) keeps the executor's full capabilities for input and hidden-UI parenting.
@@ -534,6 +699,7 @@ function HussValley.detach()
 	end
 	table.clear(connections)
 
+	restoreMovement()
 	clearSteer()
 	for character, highlight in highlights do
 		highlight:Destroy()
@@ -546,6 +712,7 @@ end
 
 -- Tunables (reaction boxes, lockouts, debug logging) stay reachable at runtime: shared.HussValley.config.debug = true
 HussValley.config = CONFIG
+HussValley.movement = movement
 
 shared.HussValley = HussValley
 xpcall(HussValley.init, onError)

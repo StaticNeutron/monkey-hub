@@ -21,7 +21,16 @@ Script hub for **Survive a Million Monkeys** with a premium UI (hypercar intro, 
 
 ## Huss Valley Hub
 
-Auto Dodge (dashes out of catcher swings and tackles through the game's own dash), Auto Ability (Q), Immortal (best effort), Threat ESP and Anti-AFK. Catches are decided by the server, so Immortal cannot be true god mode; it dodges every committed hit it can see. **RightShift** opens and closes the menu. It uses `ui.lua` and downloads it automatically.
+Auto Dodge (dashes out of catcher swings and tackles through the game's own dash), Auto Ability (Q), Immortal (best effort), Movement tweaks, Threat ESP and Anti-AFK. Catches are decided by the server, so Immortal cannot be true god mode; it dodges every committed hit it can see. **RightShift** opens and closes the menu. It uses `ui.lua` and downloads it automatically.
+
+Movement tab (retunes the game's own movement profile, nothing is written into game memory):
+
+- **No dash cooldown** (with an optional cooldown cap and "skip recovery"): a dash every ~0.3 s instead of every ~0.7 s. Auto Dodge re-arms right after each dash.
+- **Longer dash**: 1.1x to 3x dash distance.
+- **Speed boost**: 0 to 25 percent on top of the live top speed.
+- **Auto-off on a fair-play warning**: if the game's anti-cheat warns you, all three switch themselves off.
+
+The server watches movement; short tests of 2x dash rate, a 1.5x dash and +10% speed drew no warning, but pushing further raises the risk.
 
 ## GlassUI
 
