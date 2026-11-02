@@ -121,8 +121,8 @@ local movement = {
 	fullDash = false,
 	-- Reach top speed immediately instead of ramping up (Acceleration is made effectively infinite).
 	instantAccel = false,
-	-- Catchers have no runner dash; their own dash is the tackle. With this on, catcherDashKey fires that tackle.
-	catcherDash = false,
+	-- Catchers only have the tackle in the base game; this gives them the runner dash too (on by default, own key in the Catcher tab).
+	catcherDash = true,
 	-- Dash wherever you point it without turning away from your current direction first (the game normally refuses a dash
 	-- unless it is at least 35 degrees away from where you were just travelling), including straight ahead.
 	freeDash = false,
@@ -1272,9 +1272,9 @@ local function buildUi()
 	catch:AddSlider({ Text = "Tackle range (studs)", Min = 3, Max = 9, Default = 5.5, Increment = 0.5, Flag = "tackleRange", Callback = function(value) tackle.range = value end })
 	catch:AddDropdown({ Text = "Tackle aim", Options = { "Nearest runner", "Movement keys", "Camera", "Character facing" }, Default = "Nearest runner", Flag = "tackleAim", Callback = function(value) tackle.aim = value end })
 	catch:AddToggle({ Text = "Tackle on a key (the catcher's dash)", Default = false, Flag = "catcherDash", Callback = function(on) tackle.key = on end })
-	catch:AddKeybind({ Text = "Tackle key", Default = Enum.KeyCode.LeftShift, Flag = "catcherDashKey", Pressed = function() requestCatcherDash() end })
-	catch:AddToggle({ Text = "Catcher: also get the runner dash (both dashes)", Default = false, Flag = "catcherRunnerDash", Callback = function(on) movement.catcherDash = on end })
-	catch:AddKeybind({ Text = "Runner dash key", Default = Enum.KeyCode.LeftControl, Flag = "catcherRunnerDashKey", Pressed = function() requestCatcherRunnerDash() end })
+	catch:AddKeybind({ Text = "Tackle key", Default = Enum.KeyCode.LeftControl, Flag = "catcherDashKey", Pressed = function() requestCatcherDash() end })
+	catch:AddToggle({ Text = "Catcher: also get the runner dash (both dashes)", Default = true, Flag = "catcherRunnerDash", Callback = function(on) movement.catcherDash = on end })
+	catch:AddKeybind({ Text = "Runner dash key", Default = Enum.KeyCode.LeftShift, Flag = "catcherRunnerDashKey", Pressed = function() requestCatcherRunnerDash() end })
 	catch:AddLabel("Catchers normally only have the tackle. This also gives them the runner dash on its own key, so you can tackle with one key and dash with the other. Every dash tweak in the Movement tab (no cooldown, longer, faster, free direction, dash anytime, instant acceleration) applies to it. Hold a direction and press the key; without free-direction dash the game wants a turn of at least 35 degrees away from where you are running.")
 	catch:AddToggle({ Text = "No tackle cooldown", Default = false, Flag = "tackleNoCooldown", Callback = function(on) tackle.noCooldown = on end })
 	catch:AddLabel("A catcher's own dash is the tackle, so these are the catcher versions of the runner dash tweaks. The key and Auto Tackle turn you toward the chosen aim first, then dive; the game's own readiness checks still apply. The server keeps its own tackle timer, so No tackle cooldown may be refused or snap you back, and the hub then switches it off by itself.")
