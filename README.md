@@ -30,7 +30,7 @@ Movement tab (retunes the game's own movement profile, nothing is written into g
 - **Faster / instant dash**: the dash covers the same distance in 15% to 100% of the normal time (15% is about 0.04 s, near-instant). Truly instant (0%) is refused by the server, which snaps you back, so the slider stops at 15%; if a snap-back still happens the hub raises the dash time for you.
 - **Skip dash animation**: the dash happens without the dash animation (your character only).
 - **Speed boost**: 0 to 25 percent on top of the live top speed.
-- **Auto-off on a fair-play warning**: if the game's anti-cheat warns you, all three switch themselves off.
+- **Auto-off on a fair-play warning**: if the game's anti-cheat warns you, every movement tweak switches itself off.
 
 The server watches movement; short tests of 2x dash rate, a 1.5x dash and +10% speed drew no warning, but pushing further raises the risk.
 
