@@ -27,6 +27,8 @@ Movement tab (retunes the game's own movement profile, nothing is written into g
 
 - **No dash cooldown** (with an optional cooldown cap and "skip recovery"): a dash every ~0.3 s instead of every ~0.7 s. Auto Dodge re-arms right after each dash.
 - **Longer dash**: 1.1x to 3x dash distance.
+- **Faster / instant dash**: the dash covers the same distance in 15% to 100% of the normal time (15% is about 0.04 s, near-instant). Truly instant (0%) is refused by the server, which snaps you back, so the slider stops at 15%; if a snap-back still happens the hub raises the dash time for you.
+- **Skip dash animation**: the dash happens without the dash animation (your character only).
 - **Speed boost**: 0 to 25 percent on top of the live top speed.
 - **Auto-off on a fair-play warning**: if the game's anti-cheat warns you, all three switch themselves off.
 
