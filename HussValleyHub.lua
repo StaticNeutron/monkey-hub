@@ -137,6 +137,10 @@ local movement = {
 	-- fast dash at immortalDashTime percent of its normal duration, free direction) is applied on top of the
 	-- individual switches above.
 	immortal = false,
+	-- Catcher-only boosts (Catcher tab): no cooldown on the runner dash AND the tackle, and a top-speed boost.
+	catcherNoCooldown = false,
+	catcherSpeed = false,
+	catcherSpeedBoost = 5,
 	-- Each part of the Immortal dash preset is its own switch (all on by default, like the UI toggles).
 	immortalNoCooldown = true,
 	immortalSkipRecovery = true,
@@ -213,19 +217,24 @@ local tackle = {
 	noCooldown = false,
 	reachAssist = false,
 	reach = 1.5,
+	-- Report the catcher's top speed with every tackle so it starts at full length even from a standstill.
+	fullFromStandstill = false,
 }
 
 -- Replacement for TacklePrediction.remaining: with no tackle cooldown the client no longer waits for its own timer.
 ---@return number
 local function tackleRemaining()
-	if tackle.noCooldown then return 0 end
+	if tackle.noCooldown or movement.catcherNoCooldown then return 0 end
 
 	return originalRemaining()
 end
 
 -- Keeps the position nudge applied to outgoing tackles in step with the Reach assist switch and slider.
 local function syncReach()
-	if tackleHook then tackleHook.reach = tackle.reachAssist and tackle.reach or 0 end
+	if tackleHook then
+		tackleHook.reach = tackle.reachAssist and tackle.reach or 0
+		tackleHook.fullSpeed = tackle.fullFromStandstill
+	end
 end
 local movementModel = nil
 local originalStep = nil
@@ -309,7 +318,7 @@ end
 -- the game's own MovementModel when a dash starts, so changing them here is all the game needs.
 ---@param profile table
 ---@return table
-local function tuneProfile(profile)
+local function tuneProfile(profile, tuning)
 	local clone = table.clone(profile)
 
 	if tuning.speed and type(profile.MaxSpeed) == "number" and profile.MaxSpeed > 0 then
@@ -355,10 +364,26 @@ local function retunedProfile(role, player)
 	if player ~= localPlayer or type(profile) ~= "table" then return profile end
 
 	refreshTuning()
-	if not (tuning.noCooldown or tuning.noRecovery or tuning.longDash or tuning.fastDash or tuning.fullDash or tuning.instantAccel or tuning.catcherDash or tuning.speed) then return profile end
+
+	-- Catcher-only switches are layered on a copy, so the runner profile never sees them.
+	local effective = tuning
+	if role == "Catcher" and (movement.catcherNoCooldown or movement.catcherSpeed) then
+		effective = table.clone(tuning)
+		if movement.catcherNoCooldown then
+			effective.noCooldown = true
+			effective.gap = 0
+			effective.noRecovery = effective.noRecovery or movement.skipRecovery
+		end
+		if movement.catcherSpeed then
+			effective.boost = math.max(tuning.speed and tuning.boost or 0, movement.catcherSpeedBoost)
+			effective.speed = true
+		end
+	end
+
+	if not (effective.noCooldown or effective.noRecovery or effective.longDash or effective.fastDash or effective.fullDash or effective.instantAccel or effective.catcherDash or effective.speed) then return profile end
 
 	local success, result = pcall(function()
-		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%s|%s|%s|%.1f", tostring(tuning.noCooldown), tuning.gap, tostring(tuning.noRecovery), tostring(tuning.longDash), tuning.scale, tostring(tuning.fastDash), tuning.dashTime, tostring(tuning.fullDash), tostring(tuning.instantAccel), tostring(tuning.catcherDash), tostring(tuning.speed), tuning.boost)
+		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%s|%s|%s|%.1f", tostring(effective.noCooldown), effective.gap, tostring(effective.noRecovery), tostring(effective.longDash), effective.scale, tostring(effective.fastDash), effective.dashTime, tostring(effective.fullDash), tostring(effective.instantAccel), tostring(effective.catcherDash), tostring(effective.speed), effective.boost)
 		local variants = profileCache[profile]
 		if not variants then
 			variants = {}
@@ -367,7 +392,7 @@ local function retunedProfile(role, player)
 
 		local cached = variants[signature]
 		if not cached then
-			cached = tuneProfile(profile)
+			cached = tuneProfile(profile, effective)
 			variants[signature] = cached
 		end
 
@@ -514,6 +539,8 @@ local function restoreMovement()
 	if tacklePrediction and originalRemaining and tacklePrediction.remaining == tackleRemaining then swapFunction(tacklePrediction, "remaining", originalRemaining) end
 	originalRemaining = nil
 	tackle.noCooldown, tackle.reachAssist, tackle.auto, tackle.key = false, false, false, false
+	tackle.fullFromStandstill = false
+	movement.catcherNoCooldown, movement.catcherSpeed = false, false
 	syncReach()
 
 	movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
@@ -1020,7 +1047,7 @@ end
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
 	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
-	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist", "speed", "immortalNoCooldown", "immortalSkipRecovery", "immortalFullDash", "immortalFastDash", "immortalFreeDash" } do
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist", "speed", "catcherNoCooldown", "catcherSpeed", "catcherFullTackle", "immortalNoCooldown", "immortalSkipRecovery", "immortalFullDash", "immortalFastDash", "immortalFreeDash" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -1057,11 +1084,11 @@ local function watchServerSnapBack(character)
 	if lastRunStateAt > resetAt - 2.5 or os.clock() - lastRunStateAt < 3 then return end
 
 	local forced = immortalPart("immortalFastDash")
-	if not (movement.fastDash or forced or immortalPart("immortalFreeDash") or immortalPart("immortalNoCooldown") or movement.instantAccel or movement.freeDash or movement.dashAnytime or movement.catcherDash or tackle.noCooldown or tackle.reachAssist) then return end
+	if not (movement.fastDash or forced or immortalPart("immortalFreeDash") or immortalPart("immortalNoCooldown") or movement.instantAccel or movement.freeDash or movement.dashAnytime or movement.catcherDash or movement.catcherNoCooldown or movement.catcherSpeed or tackle.noCooldown or tackle.reachAssist or tackle.fullFromStandstill) then return end
 
 	-- No dash-time knob in play: the snap-back can only come from the acceleration or catcher-dash switches, so withdraw them.
 	if not (movement.fastDash or forced) then
-		for _, name in { "instantAccel", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist" } do
+		for _, name in { "instantAccel", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist", "catcherNoCooldown", "catcherSpeed", "catcherFullTackle" } do
 			local entry = ui and ui.Flags[name]
 			if entry and entry.Value == true then entry.Set(false) end
 		end
@@ -1128,6 +1155,9 @@ local REGISTRY = {
 	{ section = "Catcher", label = "Tackle key", flag = "catcherDash", kind = "toggle" },
 	{ section = "Catcher", label = "No tackle cooldown", flag = "tackleNoCooldown", kind = "toggle" },
 	{ section = "Catcher", label = "Reach assist", flag = "reachAssist", kind = "toggle" },
+	{ section = "Catcher", label = "Full-length tackle", flag = "catcherFullTackle", kind = "toggle" },
+	{ section = "Catcher", label = "No cooldown (dash + tackle)", flag = "catcherNoCooldown", kind = "toggle" },
+	{ section = "Catcher", label = "Catcher speed", flag = "catcherSpeed", kind = "toggle" },
 	{ section = "Visuals", label = "Threat ESP", flag = "esp", kind = "toggle" },
 	{ section = "Misc", label = "Anti-AFK", flag = "antiAfk", kind = "toggle" },
 	{ section = "Misc", label = "Keybind HUD", flag = "hud", kind = "toggle" },
@@ -1398,6 +1428,12 @@ local function updateLocalStatus()
 		key = "intermission"
 	elseif runState == "Lobby" or role == "Lobby" then
 		key = "lobby"
+	end
+
+	-- The server's own number for the catcher's top speed (the unmodified profile), cached for the tackle hook.
+	if tackleHook and originalGet then
+		local catcherProfile = originalGet("Catcher", localPlayer)
+		if type(catcherProfile) == "table" and type(catcherProfile.MaxSpeed) == "number" then tackleHook.top = catcherProfile.MaxSpeed end
 	end
 
 	local text = fighting and ("Fallen King: " .. tostring(king.state)) or (phase and (PHASE_LABEL[phase] or tostring(phase))) or string.format("%s / %s", tostring(role or "?"), tostring(runState or "?"))
@@ -2045,6 +2081,12 @@ local function buildUi()
 	catch:AddLabel("Catchers normally only have the tackle. This also gives them the runner dash on its own key, so you can tackle with one key and dash with the other. Every dash tweak in the Movement tab (no cooldown, longer, faster, free direction, dash anytime, instant acceleration) applies to it. Hold a direction and press the key; without free-direction dash the game wants a turn of at least 35 degrees away from where you are running.")
 	catch:AddToggle({ Text = "No tackle cooldown", Default = false, Flag = "tackleNoCooldown", Callback = function(on) tackle.noCooldown = on end })
 	catch:AddLabel("A catcher's own dash is the tackle, so these are the catcher versions of the runner dash tweaks. The key and Auto Tackle turn you toward the chosen aim first, then dive; the game's own readiness checks still apply. The server keeps its own tackle timer, so No tackle cooldown may be refused or snap you back, and the hub then switches it off by itself.")
+	catch:AddSection("Catcher boosts")
+	catch:AddToggle({ Text = "Full-length tackle from a standstill (tackle as far as a full sprint)", Default = false, Flag = "catcherFullTackle", Callback = function(on) tackle.fullFromStandstill = on syncReach() end })
+	catch:AddToggle({ Text = "No cooldown: runner dash + tackle (catcher only)", Default = false, Flag = "catcherNoCooldown", Callback = function(on) movement.catcherNoCooldown = on end })
+	catch:AddToggle({ Text = "Catcher speed boost (top speed, catcher only)", Default = false, Flag = "catcherSpeed", Callback = function(on) movement.catcherSpeed = on end })
+	catch:AddSlider({ Text = "Catcher speed boost (%)", Min = 1, Max = 25, Default = 5, Increment = 1, Flag = "catcherSpeedBoost", Callback = function(value) movement.catcherSpeedBoost = value end })
+	catch:AddLabel("The game picks how far a tackle goes from the speed you enter it at, so a tackle from a standstill is the short one. Full-length reports your top speed with the tackle instead. No cooldown removes the wait on both the runner dash and the tackle while you are a catcher; the server keeps its own timers and may refuse or snap you back. Speed raises your catcher top speed by a percent. None of these are confirmed against the server yet, and all switch themselves off on a snap-back or a fair-play warning.")
 	catch:AddSection("Hitbox")
 	catch:AddToggle({ Text = "Reach assist (hitbox expander, experimental)", Default = false, Flag = "reachAssist", Callback = function(on) tackle.reachAssist = on syncReach() end })
 	catch:AddSlider({ Text = "Extra reach (studs)", Min = 0.5, Max = 2, Default = 1.5, Increment = 0.5, Flag = "tackleReach", Callback = function(value) tackle.reach = value syncReach() end })
@@ -2154,18 +2196,26 @@ function HussValley.init()
 	-- position error). One hook per session, kept in getgenv so a re-execute never stacks a second one; it does nothing
 	-- while the reach is 0.
 	local gameAction = replicatedStorage.ChickenOrHero:WaitForChild("Game"):WaitForChild("GameAction")
-	tackleHook = getgenv().HussValleyTackleHook
+	tackleHook = getgenv().HussValleyTackleHook2
 	if not tackleHook then
-		tackleHook = { remote = gameAction, reach = 0 }
-		getgenv().HussValleyTackleHook = tackleHook
+		tackleHook = { remote = gameAction, reach = 0, fullSpeed = false, topSpeed = nil }
+		getgenv().HussValleyTackleHook2 = tackleHook
 		local hookData = tackleHook
 		local originalNamecall
 		originalNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-			if hookData.reach > 0 and self == hookData.remote and getnamecallmethod() == "FireServer" then
+			local method = getnamecallmethod()
+			if (hookData.reach > 0 or hookData.fullSpeed) and self == hookData.remote and method == "FireServer" then
 				local kind, payload = ...
 				if kind == "Tackle" and type(payload) == "table" and typeof(payload.position) == "Vector3" and typeof(payload.direction) == "Vector3" then
 					local shifted = table.clone(payload)
-					shifted.position = payload.position + payload.direction * hookData.reach
+					if hookData.reach > 0 then shifted.position = payload.position + payload.direction * hookData.reach end
+					-- Full-length tackle: the game picks the tackle's reach and distance from the speed you enter it
+					-- at (0 = shortest). Report the catcher's top speed instead of the real one.
+					-- Only plain reads here: anything that makes its own method calls would clobber the namecall method.
+					if hookData.fullSpeed and type(payload.speed) == "number" and type(hookData.top) == "number" and hookData.top > payload.speed then
+						shifted.speed = hookData.top
+					end
+					setnamecallmethod(method)
 					return originalNamecall(self, kind, shifted)
 				end
 			end
@@ -2209,7 +2259,8 @@ function HussValley.init()
 		movement.immortalNoCooldown, movement.immortalSkipRecovery, movement.immortalFullDash = false, false, false
 		movement.immortalFastDash, movement.immortalFreeDash = false, false
 		movement.instantAccel, movement.catcherDash, movement.freeDash = false, false, false
-		tackle.noCooldown, tackle.reachAssist = false, false
+		tackle.noCooldown, tackle.reachAssist, tackle.fullFromStandstill = false, false, false
+		movement.catcherNoCooldown, movement.catcherSpeed = false, false
 		syncReach()
 		guardTripped = true
 		log("fair-play warning: movement tweaks off")
