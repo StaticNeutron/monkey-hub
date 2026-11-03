@@ -404,11 +404,13 @@ function Tab:AddToggle(opts)
 	local value = false
 	local key = opts.Key
 	local bindable = opts.Bind ~= false and not opts.NoFlag
-	local row, scale = newRow(self, 36, true)
-	label(row, opts.Text, 13, COLORS.text, BODY, {
+	-- Long text wraps onto more lines and the row grows to fit, so a sentence is never cut off.
+	local lines = math.max(1, math.ceil(#tostring(opts.Text) * 6.6 / (bindable and 178 or 230)))
+	local row, scale = newRow(self, lines == 1 and 36 or lines * 15 + 14, true)
+	label(row, opts.Text, lines == 1 and 13 or 12, COLORS.text, BODY, {
 		Position = UDim2.fromOffset(12, 0),
 		Size = UDim2.new(1, bindable and -122 or -70, 1, 0),
-		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextWrapped = true,
 	})
 
 	local rail = create("Frame", { Size = UDim2.fromOffset(40, 22), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), BackgroundColor3 = COLORS.track, BackgroundTransparency = 0.2, BorderSizePixel = 0 }, row)

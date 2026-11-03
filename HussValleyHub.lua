@@ -133,10 +133,16 @@ local movement = {
 	speed = false,
 	-- Percent added on top of the live top speed, which itself moves with the round's balance buffs (about 37-42).
 	speedBoost = 5,
-	-- Immortal preset. While it is on (and immortalTweaks is allowed) the dash has no cooldown and runs at
-	-- immortalDashTime percent of its normal duration, whatever the individual switches above say.
+	-- Immortal preset. While it is on, each part that is switched on (no cooldown, no recovery, full-length dash,
+	-- fast dash at immortalDashTime percent of its normal duration, free direction) is applied on top of the
+	-- individual switches above.
 	immortal = false,
-	immortalTweaks = true,
+	-- Each part of the Immortal dash preset is its own switch (all on by default, like the UI toggles).
+	immortalNoCooldown = true,
+	immortalSkipRecovery = true,
+	immortalFullDash = true,
+	immortalFastDash = true,
+	immortalFreeDash = true,
 	immortalDashTime = 15,
 	-- Immortal also spends the Q ability; turn this off to make it dash only.
 	immortalAbility = true,
@@ -152,6 +158,7 @@ local tuning = {
 	noCooldown = false,
 	gap = 0,
 	skipRecovery = true,
+	noRecovery = false,
 	longDash = false,
 	scale = 1.5,
 	fastDash = false,
@@ -164,23 +171,32 @@ local tuning = {
 	boost = 5,
 }
 
+-- True when Immortal is on and the named part of its dash preset is switched on.
+---@param name string
+---@return boolean
+local function immortalPart(name)
+	return movement.immortal == true and movement[name] == true
+end
+
 local function refreshTuning()
-	local forced = movement.immortal and movement.immortalTweaks
-	tuning.noCooldown = movement.noCooldown or forced
-	tuning.gap = forced and 0 or movement.cooldownGap
-	tuning.skipRecovery = movement.skipRecovery or forced
+	local noCooldownPart = immortalPart("immortalNoCooldown")
+	local fastPart = immortalPart("immortalFastDash")
+	tuning.noCooldown = movement.noCooldown or noCooldownPart
+	tuning.gap = noCooldownPart and 0 or movement.cooldownGap
+	tuning.skipRecovery = movement.skipRecovery
+	tuning.noRecovery = (movement.noCooldown and movement.skipRecovery) or immortalPart("immortalSkipRecovery")
 	tuning.longDash = movement.longDash
 	tuning.scale = movement.dashScale
-	tuning.fastDash = movement.fastDash or forced
-	if forced then
+	tuning.fastDash = movement.fastDash or fastPart
+	if fastPart then
 		tuning.dashTime = movement.fastDash and math.min(movement.dashTime, movement.immortalDashTime) or movement.immortalDashTime
 	else
 		tuning.dashTime = movement.dashTime
 	end
-	tuning.fullDash = movement.fullDash or forced
+	tuning.fullDash = movement.fullDash or immortalPart("immortalFullDash")
 	tuning.instantAccel = movement.instantAccel
 	tuning.catcherDash = movement.catcherDash
-	tuning.freeDash = movement.freeDash or forced
+	tuning.freeDash = movement.freeDash or immortalPart("immortalFreeDash")
 	tuning.speed = movement.speed
 	tuning.boost = movement.speedBoost
 end
@@ -316,8 +332,8 @@ local function tuneProfile(profile)
 		if not dash.Enabled then tuned.Enabled = true end
 		if tuning.noCooldown then
 			tuned.Cooldown = math.min(dash.Cooldown, tuning.gap)
-			if tuning.skipRecovery then tuned.RecoveryDuration = 0 end
 		end
+		if tuning.noRecovery then tuned.RecoveryDuration = 0 end
 		if tuning.longDash then tuned.Distance = dash.Distance * tuning.scale end
 		-- Same distance in less time. The game's dash model copes with a duration shorter than one frame by finishing in that frame.
 		if tuning.fastDash then tuned.Duration = math.max(0.001, dash.Duration * tuning.dashTime / 100) end
@@ -339,10 +355,10 @@ local function retunedProfile(role, player)
 	if player ~= localPlayer or type(profile) ~= "table" then return profile end
 
 	refreshTuning()
-	if not (tuning.noCooldown or tuning.longDash or tuning.fastDash or tuning.fullDash or tuning.instantAccel or tuning.catcherDash or tuning.speed) then return profile end
+	if not (tuning.noCooldown or tuning.noRecovery or tuning.longDash or tuning.fastDash or tuning.fullDash or tuning.instantAccel or tuning.catcherDash or tuning.speed) then return profile end
 
 	local success, result = pcall(function()
-		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%s|%s|%s|%.1f", tostring(tuning.noCooldown), tuning.gap, tostring(tuning.skipRecovery), tostring(tuning.longDash), tuning.scale, tostring(tuning.fastDash), tuning.dashTime, tostring(tuning.fullDash), tostring(tuning.instantAccel), tostring(tuning.catcherDash), tostring(tuning.speed), tuning.boost)
+		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%s|%s|%s|%.1f", tostring(tuning.noCooldown), tuning.gap, tostring(tuning.noRecovery), tostring(tuning.longDash), tuning.scale, tostring(tuning.fastDash), tuning.dashTime, tostring(tuning.fullDash), tostring(tuning.instantAccel), tostring(tuning.catcherDash), tostring(tuning.speed), tuning.boost)
 		local variants = profileCache[profile]
 		if not variants then
 			variants = {}
@@ -422,7 +438,7 @@ end
 -- travelling the opposite way, plus the direction we picked as the input, so the game's own rule is satisfied.
 -- Anything that is not a live dash request passes straight through untouched.
 local function freeDashStep(model, moveDirection, speed, dt, profile, grounded, a, b, request, velocity, touch)
-	local forcedFree = movement.freeDash or (movement.immortal and movement.immortalTweaks)
+	local forcedFree = movement.freeDash or immortalPart("immortalFreeDash")
 	if request == true and movementModel and (forcedFree or movement.dashAnytime) then
 		pcall(function()
 			if type(profile) ~= "table" or type(profile.Dash) ~= "table" or not profile.Dash.Enabled then return end
@@ -1004,7 +1020,7 @@ end
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
 	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
-	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist", "speed", "immortalTweaks" } do
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist", "speed", "immortalNoCooldown", "immortalSkipRecovery", "immortalFullDash", "immortalFastDash", "immortalFreeDash" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -1040,8 +1056,8 @@ local function watchServerSnapBack(character)
 	if localPlayer:GetAttribute("RunState") ~= "Active" or character:GetAttribute("MovementLocked") then return end
 	if lastRunStateAt > resetAt - 2.5 or os.clock() - lastRunStateAt < 3 then return end
 
-	local forced = movement.immortal and movement.immortalTweaks
-	if not (movement.fastDash or forced or movement.instantAccel or movement.freeDash or movement.dashAnytime or movement.catcherDash or tackle.noCooldown or tackle.reachAssist) then return end
+	local forced = immortalPart("immortalFastDash")
+	if not (movement.fastDash or forced or immortalPart("immortalFreeDash") or immortalPart("immortalNoCooldown") or movement.instantAccel or movement.freeDash or movement.dashAnytime or movement.catcherDash or tackle.noCooldown or tackle.reachAssist) then return end
 
 	-- No dash-time knob in play: the snap-back can only come from the acceleration or catcher-dash switches, so withdraw them.
 	if not (movement.fastDash or forced) then
@@ -1087,7 +1103,11 @@ local REGISTRY = {
 	{ section = "Combat", label = "Proximity dodge", flag = "proximity", kind = "toggle" },
 	{ section = "Combat", label = "React to tracking", flag = "early", kind = "toggle" },
 	{ section = "Combat", label = "Immortal", flag = "immortal", kind = "toggle" },
-	{ section = "Combat", label = "Immortal: fastest dash", flag = "immortalTweaks", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: no cooldown", flag = "immortalNoCooldown", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: skip recovery", flag = "immortalSkipRecovery", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: full dash", flag = "immortalFullDash", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: fastest dash", flag = "immortalFastDash", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: free direction", flag = "immortalFreeDash", kind = "toggle" },
 	{ section = "Combat", label = "Immortal: abilities", flag = "immortalAbility", kind = "toggle" },
 	{ section = "Combat", label = "Immortal: lead catchers", flag = "immortalPredict", kind = "toggle" },
 	{ section = "Combat", label = "Immortal: speed margin", flag = "immortalSpeedMargin", kind = "toggle" },
@@ -1955,25 +1975,32 @@ local function buildUi()
 	-- Survival ----------------------------------------------------------------------------------------------------
 	window:CreateCategory("Survival")
 	local combat = window:CreateTab("Combat", "swords", "Auto dodge and immortal")
-	combat:AddSection("Dodge")
+	combat:AddSection("Auto Dodge")
 	combat:AddToggle({ Text = "Auto Dodge", Default = false, Flag = "autoDodge" })
-	combat:AddToggle({ Text = "Auto Ability (Q): runners when the dash is spent, catchers when a runner is close", Default = false, Flag = "autoAbility" })
-	combat:AddToggle({ Text = "Proximity dodge (dash away from any catcher that gets close)", Default = false, Flag = "proximity" })
-	combat:AddSlider({ Text = "Proximity range (studs)", Min = 4, Max = 14, Default = 8, Increment = 1, Flag = "proximityRange" })
 	combat:AddKeybind({ Text = "Auto Dodge on/off key", Default = Enum.KeyCode.G, Flag = "autoDodgeKey", Pressed = function()
 		local entry = ui.Flags.autoDodge
 		if entry then entry.Set(not entry.Value) end
 	end })
-	combat:AddToggle({ Text = "React to tracking catchers", Default = false, Flag = "early" })
+	combat:AddToggle({ Text = "React to tracking catchers (dodge before the swing starts)", Default = false, Flag = "early" })
 	combat:AddSlider({ Text = "Danger margin (studs)", Min = 0, Max = 4, Default = 0, Increment = 0.5, Flag = "margin" })
+	combat:AddSection("Auto Dodge: extras")
+	combat:AddToggle({ Text = "Auto Ability (Q): runners when the dash is spent, catchers when a runner is close", Default = false, Flag = "autoAbility" })
+	combat:AddToggle({ Text = "Proximity dodge (dash away from any catcher that gets close)", Default = false, Flag = "proximity" })
+	combat:AddSlider({ Text = "Proximity range (studs)", Min = 4, Max = 14, Default = 8, Increment = 1, Flag = "proximityRange" })
 	combat:AddSection("Immortal")
-	combat:AddToggle({ Text = "Immortal (best effort)", Default = false, Flag = "immortal", Callback = function(on) movement.immortal = on end })
-	combat:AddToggle({ Text = "Immortal: no cooldown + fastest dash", Default = true, Flag = "immortalTweaks", NoList = true, Callback = function(on) movement.immortalTweaks = on end })
+	combat:AddToggle({ Text = "Immortal (best effort): dodge every attack it can see, from any side", Default = false, Flag = "immortal", Callback = function(on) movement.immortal = on end })
+	combat:AddLabel("Immortal dashes out of every attack near you, even two at once. Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow. Each part below is its own switch, so you can use Immortal with any mix of them.")
+	combat:AddSection("Immortal: dash tweaks")
+	combat:AddToggle({ Text = "Immortal: no dash cooldown", Default = true, Flag = "immortalNoCooldown", NoList = true, Callback = function(on) movement.immortalNoCooldown = on end })
+	combat:AddToggle({ Text = "Immortal: skip dash recovery (no wait after a dash)", Default = true, Flag = "immortalSkipRecovery", NoList = true, Callback = function(on) movement.immortalSkipRecovery = on end })
+	combat:AddToggle({ Text = "Immortal: full-length dash, even from a standstill", Default = true, Flag = "immortalFullDash", NoList = true, Callback = function(on) movement.immortalFullDash = on end })
+	combat:AddToggle({ Text = "Immortal: fastest dash the server accepts (about 0.04 s)", Default = true, Flag = "immortalFastDash", NoList = true, Callback = function(on) movement.immortalFastDash = on end })
+	combat:AddToggle({ Text = "Immortal: dash in any direction, even straight ahead", Default = true, Flag = "immortalFreeDash", NoList = true, Callback = function(on) movement.immortalFreeDash = on end })
+	combat:AddSection("Immortal: behavior")
 	combat:AddToggle({ Text = "Immortal: also use abilities (Q)", Default = true, Flag = "immortalAbility", NoList = true, Callback = function(on) movement.immortalAbility = on end })
 	combat:AddToggle({ Text = "Immortal: lead running catchers (predict where the swing starts)", Default = true, Flag = "immortalPredict", NoList = true, Callback = function(on) movement.immortalPredict = on end })
-	combat:AddToggle({ Text = "Immortal: wider zone for fast catchers", Default = true, Flag = "immortalSpeedMargin", NoList = true, Callback = function(on) movement.immortalSpeedMargin = on end })
+	combat:AddToggle({ Text = "Immortal: wider danger zone for fast catchers", Default = true, Flag = "immortalSpeedMargin", NoList = true, Callback = function(on) movement.immortalSpeedMargin = on end })
 	combat:AddToggle({ Text = "Immortal: prefer landing spots far from every catcher", Default = true, Flag = "immortalBias", NoList = true, Callback = function(on) movement.immortalBias = on end })
-	combat:AddLabel("Dashes out of every attack near you from any side, even two at once, with no dash cooldown and the fastest dash the server accepts (about 0.04 s). Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow.")
 
 	-- Player ------------------------------------------------------------------------------------------------------
 	window:CreateCategory("Player")
@@ -2178,7 +2205,9 @@ function HussValley.init()
 		if kind ~= "Warning" or not flag("guardStop") then return end
 
 		movement.noCooldown, movement.longDash, movement.fastDash, movement.speed = false, false, false, false
-		movement.fullDash, movement.immortalTweaks = false, false
+		movement.fullDash = false
+		movement.immortalNoCooldown, movement.immortalSkipRecovery, movement.immortalFullDash = false, false, false
+		movement.immortalFastDash, movement.immortalFreeDash = false, false
 		movement.instantAccel, movement.catcherDash, movement.freeDash = false, false, false
 		tackle.noCooldown, tackle.reachAssist = false, false
 		syncReach()
