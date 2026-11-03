@@ -658,6 +658,14 @@ local function immortalOn()
 end
 
 ---@return number
+-- How far away an attacker can be and still count: Immortal and Auto Dodge each have their own range slider.
+---@return number
+local function reactRange()
+	if immortalOn() then return numberFlag("immortalRange", CONFIG.vicinity) end
+
+	return numberFlag("dodgeRange", CONFIG.vicinity)
+end
+
 local function margin()
 	return numberFlag("margin", 0) + (immortalOn() and CONFIG.immortalMargin or 0)
 end
@@ -733,6 +741,7 @@ local function scanThreats(position)
 	local extra = margin()
 	local serverNow = workspace:GetServerTimeNow()
 	local immortal = immortalOn()
+	local range = reactRange()
 	local threats = {}
 
 	for _, participant in participants() do
@@ -743,7 +752,7 @@ local function scanThreats(position)
 		if not root then continue end
 
 		local origin = root.Position
-		if flat(position - origin).Magnitude > CONFIG.vicinity then continue end
+		if flat(position - origin).Magnitude > range then continue end
 
 		-- Immortal: a catcher that is running swings from where it will be, not where it was, and a faster one covers more
 		-- ground while our dash plays, so its zone is widened a little.
@@ -1020,6 +1029,84 @@ local function assistCatcher(context)
 	end
 end
 
+-- Underground dodge: sink the character below the floor while an attack passes, then bring it back to where it stood.
+-- The character is held at that depth every frame (it would otherwise fall), then put back on the exact surface spot.
+
+local underground = nil
+
+---@param position Vector3
+---@param threats table
+---@return boolean
+local function surfaceThreatened(position, threats)
+	for _, threat in threats do
+		if threat.kind ~= "Tracking" and threat.kind ~= "Proximity" and safety(threat, position) <= 0 then return true end
+	end
+
+	return false
+end
+
+---@param context table
+---@param manual boolean
+local function goUnderground(context, manual)
+	if underground then return end
+
+	local root = context.root
+	local depth = numberFlag("undergroundDepth", 20)
+	local surface = root.CFrame
+	underground = { surface = surface, hold = surface - Vector3.new(0, depth, 0), since = os.clock(), calmSince = nil, manual = manual }
+	context.character:PivotTo(underground.hold)
+	root.AssemblyLinearVelocity = Vector3.zero
+	log("underground", depth)
+end
+
+---@param context table?
+local function comeBackUp(context)
+	local state = underground
+	underground = nil
+	if not state then return end
+
+	local character = context and context.character or localPlayer.Character
+	if character and character.Parent then
+		character:PivotTo(state.surface + Vector3.new(0, 0.5, 0))
+		local root = character:FindFirstChild("HumanoidRootPart")
+		if root then root.AssemblyLinearVelocity = Vector3.zero end
+	end
+	log("back up")
+end
+
+-- Every frame while underground: hold the spot, and come back once nothing can hit the surface spot any more.
+---@param context table
+local function manageUnderground(context)
+	local state = underground
+	if not state then return end
+
+	local root = context.root
+	root.CFrame = state.hold
+	root.AssemblyLinearVelocity = Vector3.zero
+
+	local now = os.clock()
+	if state.manual then return end
+
+	local surfacePosition = state.surface.Position
+	if surfaceThreatened(surfacePosition, scanThreats(surfacePosition)) then
+		state.calmSince = nil
+	else
+		state.calmSince = state.calmSince or now
+	end
+
+	if (state.calmSince and now - state.calmSince >= numberFlag("undergroundStay", 0.4)) or now - state.since > 3 then comeBackUp(context) end
+end
+
+-- Key / button: go down by hand, press again to come back up.
+local function toggleUnderground()
+	local character = localPlayer.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	local context = { character = character, root = root }
+	if underground then comeBackUp(context) else goUnderground(context, true) end
+end
+
 -- Dashes out of every attack near us. State of an in-progress "standing still" prime lives in primeState.
 local primeState = nil
 
@@ -1052,6 +1139,12 @@ local function react(context)
 	local now = os.clock()
 	local ready = dashReady(context.character, now)
 	refreshTuning()
+
+	-- Underground dodge: instead of dashing (or only when the dash is not ready), drop below the floor until it is over.
+	if committed and flag("undergroundDodge") and (not flag("undergroundBackup") or not ready) then
+		goUnderground(context, false)
+		return
+	end
 
 	log("threats", #threats, "committed", committed, "dashReady", ready, "sinceDash", string.format("%.2f", now - lastDash))
 
@@ -1364,7 +1457,7 @@ local function updateRings()
 	end
 
 	local dodging = flag("autoDodge") or immortalOn()
-	show("scan", dodging, CONFIG.vicinity, Color3.fromRGB(110, 160, 255))
+	show("scan", dodging, reactRange(), Color3.fromRGB(110, 160, 255))
 	show("reach", dodging, math.max(CONFIG.meleeForward, CONFIG.tackleForward) + extra, Color3.fromRGB(255, 90, 100))
 	show("tracking", immortalOn() or flag("early"), (immortalOn() and CONFIG.closeTrackingDistance or CONFIG.trackingDistance) + extra, Color3.fromRGB(250, 210, 90))
 	show("proximity", flag("proximity"), numberFlag("proximityRange", 8) + extra, Color3.fromRGB(255, 150, 60))
@@ -1377,7 +1470,7 @@ end
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
 local function stopRiskyMovement()
 	-- Immortal keeps dodging; only its forced no-cooldown / fast-dash part is withdrawn.
-	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist", "speed", "catcherNoCooldown", "catcherSpeed", "catcherFullTackle", "immortalNoCooldown", "immortalSkipRecovery", "immortalFullDash", "immortalFastDash", "immortalFreeDash" } do
+	for _, name in { "noCooldown", "longDash", "fastDash", "fullDash", "instantAccel", "catcherDash", "freeDash", "dashAnytime", "catcherRunnerDash", "tackleNoCooldown", "reachAssist", "speed", "catcherNoCooldown", "catcherSpeed", "catcherFullTackle", "undergroundDodge", "immortalNoCooldown", "immortalSkipRecovery", "immortalFullDash", "immortalFastDash", "immortalFreeDash" } do
 		local entry = ui and ui.Flags[name]
 		if entry and entry.Value == true then entry.Set(false) end
 	end
@@ -2242,6 +2335,7 @@ local function step(deltaTime)
 	local root = character and character:FindFirstChild("HumanoidRootPart")
 	if not (humanoid and root) or humanoid.Health <= 0 then
 		clearSteer()
+		underground = nil
 		return
 	end
 
@@ -2255,6 +2349,11 @@ local function step(deltaTime)
 	end
 
 	local context = { character = character, humanoid = humanoid, root = root }
+	if underground then
+		manageUnderground(context)
+		return
+	end
+
 	if runnerActive() then
 		react(context)
 	elseif catcherActive() then
@@ -2376,8 +2475,10 @@ local function teleportAcross()
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	if not (root and humanoid) or humanoid.Health <= 0 then return teleportNotify("No character to move") end
 
-	if flag("teleportRoundOnly") and not runnerActive() then
-		return teleportNotify("Only works as a runner during a round (turn off the round-only switch to override)")
+	-- A runner in a match counts from the countdown on (waiting at the start line), not only once the round is running.
+	local inRound = localPlayer:GetAttribute("InMatch") == true and localPlayer:GetAttribute("GameRole") == "Runner"
+	if flag("teleportRoundOnly") and not inRound then
+		return teleportNotify("Only works as a runner in a match, including the countdown (turn off the round-only switch to override)")
 	end
 
 	local zone = farSafeZone(root.Position)
@@ -2452,6 +2553,7 @@ local function buildUi()
 	end })
 	combat:AddToggle({ Text = "React to tracking catchers (dodge before the swing starts)", Default = false, Flag = "early" })
 	combat:AddSlider({ Text = "Danger margin (studs)", Min = 0, Max = 4, Default = 0, Increment = 0.5, Flag = "margin" })
+	combat:AddSlider({ Text = "Auto Dodge range (studs): attackers further away are ignored", Min = 8, Max = 80, Default = 45, Increment = 1, Flag = "dodgeRange" })
 	combat:AddSection("Auto Dodge: extras")
 	combat:AddToggle({ Text = "Auto Ability (Q): runners when the dash is spent, catchers when a runner is close", Default = false, Flag = "autoAbility" })
 	combat:AddToggle({ Text = "Proximity dodge (dash away from any catcher that gets close)", Default = false, Flag = "proximity" })
@@ -2459,6 +2561,14 @@ local function buildUi()
 	combat:AddSection("Immortal")
 	combat:AddToggle({ Text = "Immortal (best effort): dodge every attack it can see, from any side", Default = false, Flag = "immortal", Callback = function(on) movement.immortal = on end })
 	combat:AddLabel("Immortal dashes out of every attack near you, even two at once. Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow. Each part below is its own switch, so you can use Immortal with any mix of them.")
+	combat:AddSlider({ Text = "Immortal range (studs): attackers further away are ignored", Min = 8, Max = 80, Default = 45, Increment = 1, Flag = "immortalRange" })
+	combat:AddSection("Immortal: underground dodge")
+	combat:AddToggle({ Text = "Underground dodge: sink below the floor while an attack passes, then come back up", Default = false, Flag = "undergroundDodge" })
+	combat:AddToggle({ Text = "Only when the dash is not ready", Default = false, Flag = "undergroundBackup", NoList = true })
+	combat:AddSlider({ Text = "Depth (studs)", Min = 8, Max = 40, Default = 20, Increment = 1, Flag = "undergroundDepth" })
+	combat:AddSlider({ Text = "Stay down after the attack ends (s)", Min = 0.1, Max = 1.5, Default = 0.4, Increment = 0.05, Flag = "undergroundStay" })
+	combat:AddKeybind({ Text = "Go underground / come back up by hand", Default = Enum.KeyCode.H, Flag = "undergroundKey", Pressed = toggleUnderground })
+	combat:AddLabel("Works with Auto Dodge or Immortal switched on. When an attack is about to reach you, you drop to the chosen depth (held there so you do not fall), then you are put back on the exact spot you left once nothing can hit it any more, or after 3 seconds at most. It is a vertical jump the server can see, so it may be moved back or flagged; untested against the server.")
 	combat:AddSection("Immortal: dash tweaks")
 	combat:AddToggle({ Text = "Immortal: no dash cooldown", Default = true, Flag = "immortalNoCooldown", NoList = true, Callback = function(on) movement.immortalNoCooldown = on end })
 	combat:AddToggle({ Text = "Immortal: skip dash recovery (no wait after a dash)", Default = true, Flag = "immortalSkipRecovery", NoList = true, Callback = function(on) movement.immortalSkipRecovery = on end })
@@ -2530,7 +2640,7 @@ local function buildUi()
 	teleportTab:AddSection("Cross the field")
 	teleportTab:AddKeybind({ Text = "Teleport to the other side key", Default = Enum.KeyCode.T, Flag = "teleportKey", Pressed = teleportAcross })
 	teleportTab:AddButton({ Text = "Teleport to the other side now", Callback = teleportAcross })
-	teleportTab:AddToggle({ Text = "Only while running a round as a runner", Default = true, Flag = "teleportRoundOnly", NoList = true })
+	teleportTab:AddToggle({ Text = "Only as a runner in a match (works during the countdown before the round starts too)", Default = true, Flag = "teleportRoundOnly", NoList = true })
 	teleportTab:AddLabel("Puts you inside the safe zone at the far end of the field the moment you press the key. The server checks positions, so a jump this long can be moved back or flagged by its fair-play system (which can alert staff). If it moves you back you will get a message. Use it at your own risk, ideally on an alt.")
 
 	-- Servers -----------------------------------------------------------------------------------------------------
@@ -2729,6 +2839,7 @@ function HussValley.init()
 	-- Never carry a steer across a respawn.
 	table.insert(connections, localPlayer.CharacterAdded:Connect(function()
 		lastRunStateAt = os.clock()
+		underground = nil
 		clearSteer()
 	end))
 end
@@ -2743,6 +2854,8 @@ function HussValley.detach()
 	end
 	table.clear(connections)
 
+	-- Never leave the character below the floor.
+	pcall(comeBackUp, nil)
 	restoreMovement()
 	clearSteer()
 	for character, highlight in highlights do
