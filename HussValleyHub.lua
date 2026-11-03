@@ -1121,6 +1121,93 @@ local function surfaceThreatened(position, threats)
 	return false
 end
 
+-- Local decoy: while the real character is below the floor (that is what the server sees), your own screen keeps showing a
+-- copy of it up on the surface, copying the real pose every frame, and the camera follows that copy. The copy only
+-- exists on your client.
+local decoy = nil
+
+local function dropDecoy()
+	local state = decoy
+	decoy = nil
+	if not state then return end
+
+	pcall(function() runService:UnbindFromRenderStep("HV_Decoy") end)
+
+	local camera = workspace.CurrentCamera
+	if camera and state.subject and state.subject.Parent then camera.CameraSubject = state.subject end
+	for _, pair in state.pairs do
+		if pair[1].Parent then pair[1].LocalTransparencyModifier = 0 end
+	end
+	pcall(function() state.model:Destroy() end)
+end
+
+---@param character Model
+---@param shift Vector3 how far the real character is below its surface spot
+local function makeDecoy(character, shift)
+	if decoy or not flag("undergroundDecoy") then return end
+
+	local archivable = character.Archivable
+	character.Archivable = true
+	local model = character:Clone()
+	character.Archivable = archivable
+	if not model then return end
+
+	-- Pair every real part with its copy before anything is stripped from the copy.
+	local realParts, copyParts = {}, {}
+	for _, part in character:GetDescendants() do
+		if part:IsA("BasePart") then table.insert(realParts, part) end
+	end
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") then table.insert(copyParts, part) end
+	end
+	if #realParts ~= #copyParts then
+		model:Destroy()
+		return
+	end
+
+	local copyHumanoid = model:FindFirstChildOfClass("Humanoid")
+	if copyHumanoid then
+		copyHumanoid.RequiresNeck = false
+		copyHumanoid.BreakJointsOnDeath = false
+		copyHumanoid.WalkSpeed = 0
+		copyHumanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+		copyHumanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+	end
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("LuaSourceContainer") or descendant:IsA("JointInstance") or descendant:IsA("WeldConstraint") or descendant:IsA("Sound") or descendant:IsA("BillboardGui") or descendant:IsA("Highlight") or descendant:IsA("Animator") then
+			descendant:Destroy()
+		end
+	end
+
+	local links = {}
+	for index, real in realParts do
+		local copy = copyParts[index]
+		copy.Anchored = true
+		copy.CanCollide = false
+		copy.CanQuery = false
+		copy.CanTouch = false
+		real.LocalTransparencyModifier = 1
+		table.insert(links, { real, copy })
+	end
+
+	model.Name = "HV_Decoy"
+	model.Parent = workspace
+
+	local camera = workspace.CurrentCamera
+	decoy = { model = model, pairs = links, subject = camera and camera.CameraSubject }
+	if camera and copyHumanoid then camera.CameraSubject = copyHumanoid end
+
+	-- Just before the camera reads its subject each frame, move the copy to where the real pose is, lifted back up.
+	runService:BindToRenderStep("HV_Decoy", Enum.RenderPriority.Camera.Value - 1, function()
+		for _, pair in links do
+			if pair[1].Parent then
+				pair[1].LocalTransparencyModifier = 1
+				pair[2].CFrame = pair[1].CFrame + shift
+			end
+		end
+	end)
+end
+
 -- Drops the character straight down in a single frame. The exact CFrame it stood at is remembered, so coming back is
 -- an exact return (never a nudge up or sideways), and it can be repeated without drifting.
 ---@param context table
@@ -1139,6 +1226,8 @@ local function goUnderground(context, manual)
 
 	underground = { surface = surface, holdY = surface.Position.Y - depth, since = os.clock(), calmSince = nil, manual = manual, speed = speed }
 	if flag("undergroundNoclip") then noclipCharacter(context.character) end
+	-- The screen decoy is cosmetic: if anything about it fails, the dodge itself still happens.
+	if not pcall(makeDecoy, context.character, Vector3.new(0, depth, 0)) then dropDecoy() end
 	context.character:PivotTo(surface - Vector3.new(0, depth, 0))
 	root.AssemblyLinearVelocity = Vector3.zero
 	log("underground", depth)
@@ -1150,12 +1239,16 @@ local function comeBackUp(context)
 	local state = underground
 	underground = nil
 	undergroundEndedAt = os.clock()
-	if not state then return end
+	if not state then
+		dropDecoy()
+		return
+	end
 
 	local character = context and context.character or localPlayer.Character
 	local root = character and character.Parent and character:FindFirstChild("HumanoidRootPart")
 	if not root then
 		restoreCollisions()
+		dropDecoy()
 		return
 	end
 
@@ -1169,6 +1262,7 @@ local function comeBackUp(context)
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
 	restoreCollisions()
+	dropDecoy()
 	log("back up")
 end
 
@@ -2445,6 +2539,7 @@ local function step(deltaTime)
 		clearSteer()
 		underground = nil
 		table.clear(undergroundParts)
+		dropDecoy()
 		return
 	end
 
@@ -2680,9 +2775,10 @@ local function buildUi()
 	combat:AddSlider({ Text = "Stay down after the attack ends (s): lower = a split second", Min = 0.03, Max = 1.5, Default = 0.12, Increment = 0.01, Flag = "undergroundStay" })
 	combat:AddToggle({ Text = "Move freely with the movement keys while underground", Default = true, Flag = "undergroundMove", NoList = true })
 	combat:AddToggle({ Text = "No-clip while underground: walls and ground do not block or push you", Default = true, Flag = "undergroundNoclip", NoList = true })
+	combat:AddToggle({ Text = "Keep my own screen normal: show a copy of me on the surface and keep the camera up there", Default = true, Flag = "undergroundDecoy", NoList = true })
 	combat:AddDropdown({ Text = "Come back up at", Options = { "Where I went down", "Straight above me" }, Default = "Where I went down", Flag = "undergroundReturn" })
 	combat:AddKeybind({ Text = "Go underground / come back up by hand", Default = Enum.KeyCode.H, Flag = "undergroundKey", Pressed = toggleUnderground })
-	combat:AddLabel("Works with Auto Dodge or Immortal switched on. When an attack is about to reach you, you drop to the chosen depth in one frame (held there so you do not fall, and you can still move), then you are put back, in one frame, on the exact spot you left once nothing can hit it any more, or after 3 seconds at most. Going back to the exact spot means other players see you stay put. It is a vertical jump the server can see, so it may be moved back or flagged; untested against the server.")
+	combat:AddLabel("Works with Auto Dodge or Immortal switched on. When an attack is about to reach you, you drop to the chosen depth in one frame (held there so you do not fall, and you can still move, and on your own screen nothing changes), then you are put back, in one frame, on the exact spot you left once nothing can hit it any more, or after 3 seconds at most. Going back to the exact spot means other players see you stay put. It is a vertical jump the server can see, so it may be moved back or flagged; untested against the server.")
 	combat:AddSection("Immortal: dash tweaks")
 	combat:AddToggle({ Text = "Immortal: no dash cooldown", Default = true, Flag = "immortalNoCooldown", NoList = true, Callback = function(on) movement.immortalNoCooldown = on end })
 	combat:AddToggle({ Text = "Immortal: skip dash recovery (no wait after a dash)", Default = true, Flag = "immortalSkipRecovery", NoList = true, Callback = function(on) movement.immortalSkipRecovery = on end })
@@ -2971,6 +3067,7 @@ function HussValley.init()
 		lastRunStateAt = os.clock()
 		underground = nil
 		table.clear(undergroundParts)
+		dropDecoy()
 		clearSteer()
 	end))
 end
@@ -3014,6 +3111,8 @@ HussValley.debug = {
 	profileGet = function(role) return movementProfiles and movementProfiles.get(role or "Runner", localPlayer) end,
 	step = function(deltaTime) return step(deltaTime) end,
 	updateEsp = function() return updateEsp() end,
+	decoyOn = function(shift) makeDecoy(localPlayer.Character, shift) end,
+	decoyOff = function() dropDecoy() end,
 	setHaunt = function(folder) hauntMonsters = folder end,
 	pushHead = function(origin, direction, speed, distance) table.insert(hauntHeads, { origin = origin, direction = direction, speed = speed, distance = distance, at = os.clock() }) end,
 	servers = servers,
