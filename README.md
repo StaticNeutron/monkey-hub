@@ -7,6 +7,7 @@ Roblox executor scripts. Each one loads with a single loadstring.
 | Monkey Hub | Survive a Million Monkeys | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/MonkeyHub.lua"))()` |
 | RoWorld Hub | RoWorld [World PvP] | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/RoWorldHub.lua"))()` |
 | Huss Valley Hub | [BOSS] Huss Valley | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/HussValleyHub.lua"))()` |
+| Da Hood Hub | Da Hood | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/DaHoodHub.lua"))()` (Potassium) / `loadstring(httpget("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/DaHoodHub.lua"))()` (Matcha) |
 | GlassUI (library) | any | `local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/GlassUI.lua"))()` |
 | ui.lua (library) | any | `local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/ui.lua"))()` |
 
@@ -56,6 +57,22 @@ Catcher tab (a catcher's own dash is the tackle, so these are the catcher versio
 
 The server watches movement; short tests of 2x dash rate, a 1.5x dash and +10% speed drew no warning, but pushing further raises the risk.
 
+## Da Hood Hub
+
+One entry point (`DaHoodHub.lua`) for two executors. It detects Matcha and hands over to `DaHoodMatcha.lua`; anywhere else it runs the Potassium edition with the `V18UI.lua` window (**RightShift** opens the menu).
+
+**Potassium edition**: aimbot, silent aim and bullet redirect (through the game's own `getAim` and the `ShootGun` report), trigger bot, rapid fire, auto fire, hitboxes, auto stomp / reload, fly, speed, noclip, ESP, chams, world tweaks, spectate. Silent aim, bullet redirect and rapid fire rely on hooks and are only verified up to hook installation, not against the server.
+
+**Matcha edition** (Matcha is an external VM: no hooks, no `Instance`, part writes cost 20-40 ms each, so it is built from what that VM has):
+
+- Aimbot with three aim types: Mouse (`mousemoverel`), Memory (camera rotation written into the camera object, layout verified before writing) and Camera. Rage mode, resolver, ping-based prediction, team check, flick shot, trigger bot.
+- ESP drawn with pooled Drawing objects (boxes, 3D box, fill, glow, skeleton, silhouette chams, health / armor bars, flags, avatars), radar, off-screen arrows, optional native `RegisterModel` ESP.
+- Hitbox expander (part, width / height, range, outline), timer manipulator (exact gun cooldown, melee repeat, fast stomp / reload), infinite ammo and rapid fire (client side only), waypoints, click TP, speed through `setgc`, fly, noclip, jump boost, target hovering, desync, godmode (dodges aim lines; dry run by default).
+- Hotkeys: Z aimbot, X fly, V noclip, C flick, J hitbox, Y timer, H target hover, G desync, End panic.
+- Not possible on Matcha: freecam, lighting, real silent aim. Config is saved to `DaHoodMatcha.json`.
+
+Infinite ammo, rapid fire, hitboxes and godmode are client side or predictive: the server makes the final call, so treat them as best effort.
+
 ## GlassUI
 
 Translucent "glass" UI library with a stepper intro, glowing animated border, beat-pulse equalizer, blur-style tab transitions and a dark/light theme. Same API shape as `ui.lua`, plus `OnDestroy` so a script can unload itself when its window is unloaded:
@@ -69,7 +86,7 @@ tab:AddToggle({ Text = "Example", Flag = "example", Callback = function(on) end 
 
 ## Files
 
-- `MonkeyHub.lua`, `RoWorldHub.lua`, `HussValleyHub.lua` - the hubs.
-- `ui.lua`, `GlassUI.lua` - UI libraries.
+- `MonkeyHub.lua`, `RoWorldHub.lua`, `HussValleyHub.lua`, `DaHoodHub.lua`, `DaHoodMatcha.lua` - the hubs.
+- `ui.lua`, `GlassUI.lua`, `V18UI.lua` - UI libraries.
 
 Game API details can change with game updates.
