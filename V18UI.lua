@@ -281,7 +281,9 @@ end
 ---@param height number
 ---@param clickable boolean
 ---@return Instance, UIScale
-local function newRow(tab, height, clickable)
+local function newRow(tab, height, clickable, rest, hover)
+	rest = rest or 0.93
+	hover = hover or 0.86
 	local card = currentCard(tab)
 	tab.order = tab.order + 1
 	tab.heights[tab.column] = tab.heights[tab.column] + height + 6
@@ -289,7 +291,7 @@ local function newRow(tab, height, clickable)
 	local props = {
 		Size = UDim2.new(1, 0, 0, height),
 		BackgroundColor3 = COLORS.row,
-		BackgroundTransparency = 0.93,
+		BackgroundTransparency = rest,
 		BorderSizePixel = 0,
 		LayoutOrder = tab.order,
 	}
@@ -303,10 +305,10 @@ local function newRow(tab, height, clickable)
 	local scale = create("UIScale", { Scale = 1 }, row)
 
 	track(row.MouseEnter:Connect(function()
-		tween(row, 0.2, { BackgroundTransparency = 0.86 })
+		tween(row, 0.2, { BackgroundTransparency = hover })
 	end))
 	track(row.MouseLeave:Connect(function()
-		tween(row, 0.25, { BackgroundTransparency = 0.93 })
+		tween(row, 0.25, { BackgroundTransparency = rest })
 	end))
 
 	return row, scale
@@ -366,9 +368,9 @@ end
 
 ---@param opts table
 function Tab:AddButton(opts)
-	local row, scale = newRow(self, 36, true)
+	-- The accent fill is the resting look; hovering only brightens it a little (the plain row hover would fade it out).
+	local row, scale = newRow(self, 36, true, 0.05, 0.22)
 	row.BackgroundColor3 = Color3.new(1, 1, 1)
-	row.BackgroundTransparency = 0.05
 	gradient(row, COLORS.accent, COLORS.accent2, 0)
 	label(row, opts.Text, 13, Color3.fromRGB(14, 20, 40), BOLD, {
 		Size = UDim2.fromScale(1, 1),
