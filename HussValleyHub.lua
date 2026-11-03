@@ -91,6 +91,11 @@ local participantDirectory = nil
 local lastDash = 0
 local lastAbility = 0
 local lastDashCount = nil
+-- When the game's own movement model last had a dash running (set from inside its step), and the dash we asked for that
+-- has not shown up yet. A BoostInput request is only good for 0.15 s and is thrown away if the model cannot dash on that
+-- frame, so a dash that did not start is asked for again right away.
+local dashSeenAt = -10
+local pendingDash = nil
 local tickTimer = 0
 local espTimer = 0
 local lastError = 0
@@ -530,6 +535,12 @@ end
 -- With free dash on, a dash request the game would accept anyway gets a fake history entry saying we were just
 -- travelling the opposite way, plus the direction we picked as the input, so the game's own rule is satisfied.
 -- Anything that is not a live dash request passes straight through untouched.
+-- Passes the step's results through, remembering whether the model has a dash running after it.
+local function noteDash(model, ...)
+	if type(model) == "table" and (tonumber(model.dashRemaining) or 0) > 0 then dashSeenAt = os.clock() end
+	return ...
+end
+
 local function freeDashStep(model, moveDirection, speed, dt, profile, grounded, a, b, request, velocity, touch)
 	local forcedFree = movement.freeDash or immortalPart("immortalFreeDash")
 	if request == true and movementModel and (forcedFree or movement.dashAnytime) then
@@ -557,7 +568,7 @@ local function freeDashStep(model, moveDirection, speed, dt, profile, grounded, 
 		end)
 	end
 
-	return originalStep(model, moveDirection, speed, dt, profile, grounded, a, b, request, velocity, touch)
+	return noteDash(model, originalStep(model, moveDirection, speed, dt, profile, grounded, a, b, request, velocity, touch))
 end
 
 local function installMovement()
@@ -1044,6 +1055,22 @@ local function react(context)
 
 	log("threats", #threats, "committed", committed, "dashReady", ready, "sinceDash", string.format("%.2f", now - lastDash))
 
+	-- A dash we asked for that never started (the game threw the request away): ask again straight away, same way.
+	if pendingDash then
+		if dashSeenAt >= pendingDash.at or now - pendingDash.at > 0.4 then
+			pendingDash = nil
+		elseif dodgeOn and now - pendingDash.tried >= 0.03 and boostInput.available(localPlayer) then
+			setthreadidentity(8)
+			pendingDash.tried = now
+			steer(pendingDash.direction, CONFIG.steerHold)
+			boostInput.request()
+			setthreadidentity(8)
+			log("dash did not start, asking again")
+			return
+		end
+		setthreadidentity(8)
+	end
+
 	local lockout = committed and (tuning.noCooldown and CONFIG.fastDashLockout or CONFIG.dashLockout) or CONFIG.trackingLockout
 	if dodgeOn and ready and now - lastDash >= lockout then
 		local velocity = context.root.AssemblyLinearVelocity
@@ -1067,6 +1094,7 @@ local function react(context)
 
 		lastDash = now
 		lastDashCount = context.character:GetAttribute("DashCount")
+		pendingDash = { at = now, tried = now, direction = direction }
 		steer(direction, CONFIG.steerHold)
 		boostInput.request()
 		setthreadidentity(8)
@@ -1120,6 +1148,230 @@ local function updateEsp()
 		highlight.Parent = guiParent
 		highlights[character] = highlight
 	end
+end
+
+-- Ability ESP -------------------------------------------------------------------------------------------------------------
+-- A label over every other player with their ability / gear cooldowns and any effect that is running, and a box that
+-- shows through walls around players who are cloaked (invisible). Everything is read from replicated attributes.
+
+local abilityVisuals = {}
+local ABILITY_NAMES = {
+	{ "Ghost", "GhostAbilityReadyAt" },
+	{ "Truck", "TruckAbilityReadyAt" },
+	{ "Clone", "CloneAbilityReadyAt" },
+	{ "Cannon", "CannonReadyAt" },
+	{ "Step over", "StepOverReadyAt" },
+}
+
+---@param value any
+---@param serverNow number
+---@return number
+local function secondsLeft(value, serverNow)
+	return (tonumber(value) or 0) - serverNow
+end
+
+---@param participant Player
+---@param character Model
+---@param serverNow number
+---@param showAbilities boolean
+---@return string, boolean
+local function abilityLabel(participant, character, serverNow, showAbilities)
+	local lines = {}
+	local cloaked = character:GetAttribute("Cloaked") == true
+	local ghosted = character:GetAttribute("Ghosted") == true
+
+	if cloaked then table.insert(lines, "<font color=\"#ff5cf0\"><b>CLOAKED</b></font>") end
+	if ghosted then table.insert(lines, "<font color=\"#b9a4ff\"><b>GHOST</b></font>") end
+
+	if showAbilities then
+		local main = secondsLeft(participant:GetAttribute("AbilityReadyAt"), serverNow)
+		table.insert(lines, main > 0 and string.format("Ability <font color=\"#ffb347\">%.0fs</font>", main) or "Ability <font color=\"#5eead4\">ready</font>")
+
+		for _, entry in ABILITY_NAMES do
+			local left = secondsLeft(participant:GetAttribute(entry[2]), serverNow)
+			if left > 0 then table.insert(lines, string.format("%s <font color=\"#ffb347\">%.0fs</font>", entry[1], left)) end
+		end
+
+		local gear = secondsLeft(participant:GetAttribute("GearReadyAt"), serverNow)
+		if gear > 0 then table.insert(lines, string.format("Gear <font color=\"#ffb347\">%.0fs</font>", gear)) end
+
+		local effects = {}
+		if character:GetAttribute("HitShielded") == true then table.insert(effects, "shield") end
+		if secondsLeft(character:GetAttribute("RocketUntil"), serverNow) > 0 then table.insert(effects, "rocket") end
+		if secondsLeft(character:GetAttribute("CloneAbilityActiveUntil"), serverNow) > 0 then table.insert(effects, "clone") end
+		if secondsLeft(character:GetAttribute("GhostImmuneUntil"), serverNow) > 0 or secondsLeft(character:GetAttribute("FFAImmuneUntil"), serverNow) > 0 then table.insert(effects, "immune") end
+		if character:GetAttribute("BigDaggerActive") == true then table.insert(effects, "big dagger") end
+		if #effects > 0 then table.insert(lines, "<font color=\"#ff6b81\">" .. table.concat(effects, ", ") .. "</font>") end
+	end
+
+	return table.concat(lines, "\n"), cloaked or ghosted
+end
+
+---@param character Model
+local function dropAbilityVisual(character)
+	local visual = abilityVisuals[character]
+	if not visual then return end
+
+	for _, object in { visual.gui, visual.box, visual.highlight } do
+		pcall(function() object:Destroy() end)
+	end
+	abilityVisuals[character] = nil
+end
+
+local function updateAbilityEsp()
+	local wantAbilities = flag("abilityEsp")
+	local wantCloak = flag("cloakEsp")
+	local wanted = {}
+
+	if (wantAbilities or wantCloak) and guiParent then
+		local serverNow = workspace:GetServerTimeNow()
+		for _, participant in participants() do
+			if participant == localPlayer then continue end
+
+			local character = participant.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			if not (root and character.Parent) then continue end
+
+			local text, hidden = abilityLabel(participant, character, serverNow, wantAbilities)
+			-- A cloaked player is always labelled when the cloak highlight is on, even with the ability labels off.
+			local showCloak = wantCloak and hidden
+			if text == "" or not (wantAbilities or showCloak) then continue end
+
+			wanted[character] = true
+			local visual = abilityVisuals[character]
+			if not visual then
+				local gui = Instance.new("BillboardGui")
+				gui.Name = "HV_Ability"
+				gui.Adornee = root
+				gui.AlwaysOnTop = true
+				gui.LightInfluence = 0
+				gui.MaxDistance = 300
+				gui.Size = UDim2.fromOffset(170, 70)
+				gui.StudsOffset = Vector3.new(0, 3.6, 0)
+				gui.Parent = guiParent
+
+				local label = Instance.new("TextLabel")
+				label.BackgroundTransparency = 1
+				label.Size = UDim2.fromScale(1, 1)
+				label.RichText = true
+				label.Font = Enum.Font.GothamBold
+				label.TextSize = 12
+				label.TextColor3 = Color3.new(1, 1, 1)
+				label.TextStrokeTransparency = 0.35
+				label.TextYAlignment = Enum.TextYAlignment.Bottom
+				label.Parent = gui
+
+				visual = { gui = gui, label = label, text = "" }
+				abilityVisuals[character] = visual
+			end
+
+			visual.gui.Adornee = root
+			if visual.text ~= text then
+				visual.text = text
+				visual.label.Text = text
+			end
+
+			-- Cloaked players are see-through, so the highlight alone may not draw: add a box that always does.
+			if showCloak and not visual.box then
+				local box = Instance.new("BoxHandleAdornment")
+				box.Name = "HV_Cloak"
+				box.Adornee = root
+				box.AlwaysOnTop = true
+				box.ZIndex = 5
+				box.Size = Vector3.new(4, 6, 2.5)
+				box.Transparency = 0.5
+				box.Color3 = Color3.fromRGB(255, 92, 240)
+				box.Parent = guiParent
+				visual.box = box
+
+				local highlight = Instance.new("Highlight")
+				highlight.Name = "HV_CloakGlow"
+				highlight.Adornee = character
+				highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+				highlight.FillColor = Color3.fromRGB(255, 92, 240)
+				highlight.FillTransparency = 0.35
+				highlight.OutlineColor = Color3.new(1, 1, 1)
+				highlight.OutlineTransparency = 0
+				highlight.Parent = guiParent
+				visual.highlight = highlight
+			elseif not showCloak and visual.box then
+				pcall(function() visual.box:Destroy() end)
+				pcall(function() visual.highlight:Destroy() end)
+				visual.box, visual.highlight = nil, nil
+			end
+		end
+	end
+
+	for character in abilityVisuals do
+		if not wanted[character] or not character.Parent then dropAbilityVisual(character) end
+	end
+end
+
+-- Activation rings -----------------------------------------------------------------------------------------------------
+-- Flat rings on the ground around you showing how far each feature reaches.
+
+local rings = {}
+
+---@param key string
+---@param radius number
+---@param color Color3
+---@param root BasePart
+local function setRing(key, radius, color, root)
+	local ring = rings[key]
+	if not ring then
+		ring = Instance.new("CylinderHandleAdornment")
+		ring.Name = "HV_Ring_" .. key
+		ring.Height = 0.15
+		ring.AlwaysOnTop = false
+		ring.ZIndex = 1
+		ring.Transparency = 0.3
+		ring.CFrame = CFrame.new(0, -2.9, 0) * CFrame.Angles(math.pi / 2, 0, 0)
+		ring.Parent = guiParent
+		rings[key] = ring
+	end
+
+	ring.Adornee = root
+	ring.Color3 = color
+	ring.Radius = radius
+	ring.InnerRadius = math.max(0, radius - 0.4)
+end
+
+local function clearRings(keep)
+	for key, ring in rings do
+		if not (keep and keep[key]) then
+			pcall(function() ring:Destroy() end)
+			rings[key] = nil
+		end
+	end
+end
+
+local function updateRings()
+	local character = localPlayer.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not (flag("radiusRings") and root and guiParent) then
+		if next(rings) then clearRings(nil) end
+		return
+	end
+
+	local preview = flag("radiusPreview")
+	local extra = margin()
+	local keep = {}
+	local function show(key, active, radius, color)
+		if not (active or preview) then return end
+
+		keep[key] = true
+		setRing(key, radius, color, root)
+	end
+
+	local dodging = flag("autoDodge") or immortalOn()
+	show("scan", dodging, CONFIG.vicinity, Color3.fromRGB(110, 160, 255))
+	show("reach", dodging, math.max(CONFIG.meleeForward, CONFIG.tackleForward) + extra, Color3.fromRGB(255, 90, 100))
+	show("tracking", immortalOn() or flag("early"), (immortalOn() and CONFIG.closeTrackingDistance or CONFIG.trackingDistance) + extra, Color3.fromRGB(250, 210, 90))
+	show("proximity", flag("proximity"), numberFlag("proximityRange", 8) + extra, Color3.fromRGB(255, 150, 60))
+	show("tackle", tackle.auto, tackle.range, Color3.fromRGB(96, 214, 150))
+	show("ability", flag("autoAbility"), CONFIG.catcherAbilityRange, Color3.fromRGB(200, 140, 240))
+
+	clearRings(keep)
 end
 
 -- The game's fair-play system warned us: put every movement tweak back to normal and say so.
@@ -1975,6 +2227,8 @@ local function step(deltaTime)
 	if espTimer >= CONFIG.espRate then
 		espTimer = 0
 		updateEsp()
+		updateAbilityEsp()
+		updateRings()
 	end
 
 	refreshHud()
@@ -2318,6 +2572,14 @@ local function buildUi()
 	local visuals = window:CreateTab("Visuals", "eye", "See threats through walls")
 	visuals:AddSection("ESP")
 	visuals:AddToggle({ Text = "Threat ESP", Default = false, Flag = "esp" })
+	visuals:AddSection("Abilities")
+	visuals:AddToggle({ Text = "Ability ESP: every player's ability and gear cooldowns and running effects", Default = false, Flag = "abilityEsp" })
+	visuals:AddToggle({ Text = "Highlight cloaked (invisible) players through walls", Default = true, Flag = "cloakEsp" })
+	visuals:AddLabel("The label over a player shows Ability ready or its cooldown, any named ability that is cooling down (Ghost, Truck, Clone, Cannon, Step over), gear cooldown, and effects that are running: shield, rocket, clone, immune, big dagger. A player who used the Cloak gets a magenta box and glow that show through walls even though they are invisible.")
+	visuals:AddSection("Activation radius")
+	visuals:AddToggle({ Text = "Show activation radius rings around you", Default = false, Flag = "radiusRings" })
+	visuals:AddToggle({ Text = "Also show the rings of features that are switched off", Default = false, Flag = "radiusPreview", NoList = true })
+	visuals:AddLabel("Blue = Auto Dodge / Immortal scan range. Red = how far an attack reaches. Yellow = Immortal's close-lock trigger (or React to tracking). Orange = Proximity dodge. Green = Auto Tackle range. Purple = catcher Auto Ability range.")
 
 	-- Misc --------------------------------------------------------------------------------------------------------
 	window:CreateCategory("Misc")
@@ -2487,6 +2749,8 @@ function HussValley.detach()
 		highlight:Destroy()
 		highlights[character] = nil
 	end
+	for character in abilityVisuals do dropAbilityVisual(character) end
+	clearRings(nil)
 
 	if hudGui then pcall(function() hudGui:Destroy() end) end
 	if serverGui then pcall(function() serverGui:Destroy() end) end
