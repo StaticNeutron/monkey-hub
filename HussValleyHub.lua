@@ -49,6 +49,10 @@ local CONFIG = {
 	tackleForward = 22,
 	tackleBehind = 1.5,
 	tackleHalfWidth = 5.5,
+	-- HauntConfig: Zombie BiteRange 4.8 (+ a margin so the dash is out before the 0.45 s windup ends), Skeleton HeadRadius 2.4.
+	zombieReach = 6.8,
+	headRadius = 2.4,
+	headGrace = 0.3,
 	-- Slack on top of TackleDuration for clock skew; a TackleActive flag older than this is treated as stale.
 	tackleGrace = 0.5,
 	-- Tracking catcher locked on to us (only used by early dodge / immortal).
@@ -96,6 +100,10 @@ local lastDashCount = nil
 -- frame, so a dash that did not start is asked for again right away.
 local dashSeenAt = -10
 local pendingDash = nil
+-- Zombies and skeletons from the Haunt event: Game.HauntMonsters holds one object per monster (attributes Kind, P, State),
+-- and HauntEvent "Head" announces each skeleton head that is thrown.
+local hauntMonsters = nil
+local hauntHeads = {}
 local tickTimer = 0
 local espTimer = 0
 local lastError = 0
@@ -773,6 +781,19 @@ local function scanThreats(position)
 			})
 		end
 
+		-- A catcher that stands still and swings at someone else: the swing direction we can see is not a promise about
+		-- who it hits, so the whole circle around it counts as dangerous.
+		if (phase == "Windup" or phase == "Active") and flag("standingSwing") and catcherSpeed.Magnitude < 3 then
+			local toUs = flat(position - origin)
+			local reach = CONFIG.meleeForward + pad
+			if toUs.Magnitude <= reach then
+				table.insert(threats, {
+					kind = "Melee", catcher = participant.Name, origin = origin, dir = toUs.Magnitude > 0.01 and toUs.Unit or Vector3.new(1, 0, 0),
+					limit = reach, behind = reach, half = reach, slack = 0,
+				})
+			end
+		end
+
 		-- Tackle dive: TackleActive for TackleDuration along TackleDirection.
 		local tackleDirection = character:GetAttribute("TackleDirection")
 		if character:GetAttribute("TackleActive") == true and typeof(tackleDirection) == "Vector3" and flat(tackleDirection).Magnitude > 0.01 then
@@ -808,6 +829,39 @@ local function scanThreats(position)
 				table.insert(threats, {
 					kind = "Tracking", catcher = participant.Name, origin = origin, dir = toUs.Unit,
 					limit = close + extra, behind = 0, half = 3 + extra, slack = 0,
+				})
+			end
+		end
+	end
+
+	-- Haunt event: zombies bite whatever is close, skeletons throw heads along a line.
+	if flag("hauntDodge") then
+		if hauntMonsters then
+			for _, monster in hauntMonsters:GetChildren() do
+				local at = monster:GetAttribute("P")
+				local state = monster:GetAttribute("State")
+				if typeof(at) ~= "Vector3" or state == "Dead" or state == "Summon" or monster:GetAttribute("Kind") ~= "Zombie" then continue end
+
+				local toUs = flat(position - at)
+				local reach = CONFIG.zombieReach + extra
+				if toUs.Magnitude <= reach then
+					table.insert(threats, {
+						kind = "Zombie", catcher = "zombie", origin = at, dir = toUs.Magnitude > 0.01 and toUs.Unit or Vector3.new(1, 0, 0),
+						limit = reach, behind = reach, half = reach, slack = 0,
+					})
+				end
+			end
+		end
+
+		local now = os.clock()
+		for index = #hauntHeads, 1, -1 do
+			local head = hauntHeads[index]
+			if now - head.at > head.distance / head.speed + CONFIG.headGrace then
+				table.remove(hauntHeads, index)
+			elseif flat(head.direction).Magnitude > 0.01 then
+				table.insert(threats, {
+					kind = "Head", catcher = "skeleton", origin = head.origin, dir = flat(head.direction).Unit,
+					limit = head.distance, behind = 1, half = CONFIG.headRadius + 1 + extra, slack = 0,
 				})
 			end
 		end
@@ -2611,6 +2665,8 @@ local function buildUi()
 	combat:AddSlider({ Text = "Auto Dodge range (studs): attackers further away are ignored", Min = 8, Max = 80, Default = 45, Increment = 1, Flag = "dodgeRange" })
 	combat:AddSection("Auto Dodge: extras")
 	combat:AddToggle({ Text = "Auto Ability (Q): runners when the dash is spent, catchers when a runner is close", Default = false, Flag = "autoAbility" })
+	combat:AddToggle({ Text = "Dodge zombies and skeleton heads (the Haunt event monsters)", Default = true, Flag = "hauntDodge", NoList = true })
+	combat:AddToggle({ Text = "Dodge swings from catchers that stand still, even when they are hitting other players", Default = true, Flag = "standingSwing", NoList = true })
 	combat:AddToggle({ Text = "Proximity dodge (dash away from any catcher that gets close)", Default = false, Flag = "proximity" })
 	combat:AddSlider({ Text = "Proximity range (studs)", Min = 4, Max = 14, Default = 8, Increment = 1, Flag = "proximityRange" })
 	combat:AddSection("Immortal")
@@ -2822,6 +2878,22 @@ function HussValley.init()
 	syncReach()
 	participantDirectory = loadModule(replicatedStorage.ChickenOrHero:WaitForChild("Presentation"):WaitForChild("ParticipantDirectory"))
 
+	-- Haunt event objects may appear late, so look for them without blocking start-up.
+	task.spawn(function()
+		local gameFolder = replicatedStorage.ChickenOrHero:WaitForChild("Game")
+		hauntMonsters = gameFolder:WaitForChild("HauntMonsters", 60)
+		local hauntEvent = gameFolder:WaitForChild("HauntEvent", 60)
+		if not hauntEvent or detaching then return end
+
+		-- Plain table writes only: this callback runs at a low thread identity.
+		table.insert(connections, hauntEvent.OnClientEvent:Connect(function(kind, _, origin, direction, speed, distance)
+			if kind ~= "Head" or typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" or type(speed) ~= "number" or type(distance) ~= "number" or speed <= 0 then return end
+
+			table.insert(hauntHeads, { origin = origin, direction = direction, speed = speed, distance = distance, at = os.clock() })
+			if #hauntHeads > 12 then table.remove(hauntHeads, 1) end
+		end))
+	end)
+
 	guiParent = resolveGuiParent()
 
 	-- The game answers server-list requests on this remote (only for players in the lobby); keep the latest reply.
@@ -2942,6 +3014,8 @@ HussValley.debug = {
 	profileGet = function(role) return movementProfiles and movementProfiles.get(role or "Runner", localPlayer) end,
 	step = function(deltaTime) return step(deltaTime) end,
 	updateEsp = function() return updateEsp() end,
+	setHaunt = function(folder) hauntMonsters = folder end,
+	pushHead = function(origin, direction, speed, distance) table.insert(hauntHeads, { origin = origin, direction = direction, speed = speed, distance = distance, at = os.clock() }) end,
 	servers = servers,
 	renderServers = function() return renderServers() end,
 }
