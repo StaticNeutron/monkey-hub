@@ -6,7 +6,7 @@
 -- attributes, a dash goes through ChickenOrHero.Movement.BoostInput, catches themselves are server-side.
 -- Movement tweaks retune the game's own movement profile (MovementProfiles.get), so cooldown, recovery, distance and
 -- speed all flow through the game's formulas; nothing is written into game memory.
--- UI: GlassUI (glassui.lua in the executor workspace, or the copy in the same GitHub repo).
+-- UI: V18UI (V18UI.lua in the executor workspace, or the copy in the same GitHub repo), same look as the Da Hood hub.
 if not shared then return warn("No shared, no script.") end
 
 -- Singleton: replace a previous instance.
@@ -18,8 +18,8 @@ local HussValley = {}
 
 -- Constants.
 local PLACE_ID = 107535308163741
-local UI_FILE = "glassui.lua"
-local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/GlassUI.lua"
+local UI_FILE = "V18UI.lua"
+local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/V18UI.lua"
 
 -- Per-game values. Each one comes from the decompiled client config named next to it.
 local CONFIG = {
@@ -140,6 +140,11 @@ local movement = {
 	immortalDashTime = 15,
 	-- Immortal also spends the Q ability; turn this off to make it dash only.
 	immortalAbility = true,
+	-- Immortal extras: lead a moving catcher's swing origin, widen the danger zone with the catcher's speed, and prefer
+	-- landing spots far from every catcher. All on by default (the UI toggles carry the same default).
+	immortalPredict = true,
+	immortalSpeedMargin = true,
+	immortalBias = true,
 }
 
 -- What the movement wrapper applies right now: the user's own switches combined with the Immortal preset's.
@@ -609,13 +614,21 @@ local function scanThreats(position)
 		local origin = root.Position
 		if flat(position - origin).Magnitude > CONFIG.vicinity then continue end
 
+		-- Immortal: a catcher that is running swings from where it will be, not where it was, and a faster one covers more
+		-- ground while our dash plays, so its zone is widened a little.
+		local catcherSpeed = flat(root.AssemblyLinearVelocity)
+		local pad = extra
+		if immortal and movement.immortalSpeedMargin then pad = extra + math.min(catcherSpeed.Magnitude * 0.04, 1.5) end
+
 		-- Melee swing: Windup then Active, aimed along ReachDirection.
 		local phase = character:GetAttribute("ReachPhase")
 		local reachDirection = character:GetAttribute("ReachDirection")
+		local meleeOrigin = origin
+		if immortal and movement.immortalPredict then meleeOrigin = origin + catcherSpeed * (phase == "Windup" and 0.12 or 0.06) end
 		if (phase == "Windup" or phase == "Active") and typeof(reachDirection) == "Vector3" and flat(reachDirection).Magnitude > 0.01 then
 			table.insert(threats, {
-				kind = "Melee", catcher = participant.Name, origin = origin, dir = flat(reachDirection).Unit,
-				limit = CONFIG.meleeForward, behind = CONFIG.meleeBehind, half = CONFIG.meleeHalfWidth + extra,
+				kind = "Melee", catcher = participant.Name, origin = meleeOrigin, dir = flat(reachDirection).Unit,
+				limit = CONFIG.meleeForward, behind = CONFIG.meleeBehind, half = CONFIG.meleeHalfWidth + pad,
 				slack = phase == "Windup" and CONFIG.aimSlack or 0,
 			})
 		end
@@ -628,7 +641,7 @@ local function scanThreats(position)
 			if not startedAt or (serverNow - startedAt) <= duration + CONFIG.tackleGrace then
 				table.insert(threats, {
 					kind = "Tackle", catcher = participant.Name, origin = origin, dir = flat(tackleDirection).Unit,
-					limit = CONFIG.tackleForward, behind = CONFIG.tackleBehind, half = CONFIG.tackleHalfWidth + extra, slack = 0,
+					limit = CONFIG.tackleForward, behind = CONFIG.tackleBehind, half = CONFIG.tackleHalfWidth + pad, slack = 0,
 				})
 			end
 		end
@@ -694,8 +707,18 @@ local function pickEvasion(threats, character, position, velocity, standing)
 			worst = math.min(worst, safety(threat, landing))
 		end
 
+		-- Immortal: between equally safe spots, take the one further from every catcher.
+		local bias = 0
+		if movement.immortal and movement.immortalBias then
+			local nearest = math.huge
+			for _, threat in threats do
+				nearest = math.min(nearest, flat(landing - threat.origin).Magnitude)
+			end
+			bias = math.min(nearest, 20) * 0.5
+		end
+
 		local legal = travel == nil or direction:Dot(travel) <= CONFIG.minIntentCos
-		local score = math.min(worst, 8) * 10 - (reach - travelled) * 2 - (legal and 0 or 60)
+		local score = math.min(worst, 8) * 10 - (reach - travelled) * 2 - (legal and 0 or 60) + bias
 		-- Tie-break toward the way we are already heading so dodges stay natural.
 		if travel then score = score + direction:Dot(travel) * 0.5 end
 
@@ -1051,6 +1074,724 @@ local function watchServerSnapBack(character)
 	end
 end
 
+-- One list drives both the on-screen HUD and the Settings "Keybinds" section: add a line here and it shows up in both.
+-- kind "key" prints the bound key, kind "toggle" prints ON/OFF live from the flag.
+local REGISTRY = {
+	{ section = "Keybinds", label = "Menu", flag = "ui_toggleKey", kind = "key" },
+	{ section = "Keybinds", label = "Auto Dodge on/off", flag = "autoDodgeKey", kind = "key" },
+	{ section = "Keybinds", label = "Runner dash (catcher)", flag = "catcherRunnerDashKey", kind = "key" },
+	{ section = "Keybinds", label = "Tackle (catcher)", flag = "catcherDashKey", kind = "key" },
+	{ section = "Keybinds", label = "Keybind HUD", flag = "hudKey", kind = "key" },
+	{ section = "Combat", label = "Auto Dodge", flag = "autoDodge", kind = "toggle" },
+	{ section = "Combat", label = "Auto Ability (Q)", flag = "autoAbility", kind = "toggle" },
+	{ section = "Combat", label = "Proximity dodge", flag = "proximity", kind = "toggle" },
+	{ section = "Combat", label = "React to tracking", flag = "early", kind = "toggle" },
+	{ section = "Combat", label = "Immortal", flag = "immortal", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: fastest dash", flag = "immortalTweaks", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: abilities", flag = "immortalAbility", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: lead catchers", flag = "immortalPredict", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: speed margin", flag = "immortalSpeedMargin", kind = "toggle" },
+	{ section = "Combat", label = "Immortal: escape bias", flag = "immortalBias", kind = "toggle" },
+	{ section = "Movement", label = "No dash cooldown", flag = "noCooldown", kind = "toggle" },
+	{ section = "Movement", label = "Skip recovery", flag = "skipRecovery", kind = "toggle" },
+	{ section = "Movement", label = "Longer dash", flag = "longDash", kind = "toggle" },
+	{ section = "Movement", label = "Dash anytime", flag = "dashAnytime", kind = "toggle" },
+	{ section = "Movement", label = "Free-direction dash", flag = "freeDash", kind = "toggle" },
+	{ section = "Movement", label = "Full-distance dash", flag = "fullDash", kind = "toggle" },
+	{ section = "Movement", label = "Faster dash", flag = "fastDash", kind = "toggle" },
+	{ section = "Movement", label = "Skip dash animation", flag = "skipAnimation", kind = "toggle" },
+	{ section = "Movement", label = "Instant acceleration", flag = "instantAccel", kind = "toggle" },
+	{ section = "Movement", label = "Speed tuning", flag = "speed", kind = "toggle" },
+	{ section = "Movement", label = "Auto-off on warning", flag = "guardStop", kind = "toggle" },
+	{ section = "Catcher", label = "Auto Tackle", flag = "autoTackle", kind = "toggle" },
+	{ section = "Catcher", label = "Runner dash", flag = "catcherRunnerDash", kind = "toggle" },
+	{ section = "Catcher", label = "Tackle key", flag = "catcherDash", kind = "toggle" },
+	{ section = "Catcher", label = "No tackle cooldown", flag = "tackleNoCooldown", kind = "toggle" },
+	{ section = "Catcher", label = "Reach assist", flag = "reachAssist", kind = "toggle" },
+	{ section = "Visuals", label = "Threat ESP", flag = "esp", kind = "toggle" },
+	{ section = "Misc", label = "Anti-AFK", flag = "antiAfk", kind = "toggle" },
+	{ section = "Misc", label = "Keybind HUD", flag = "hud", kind = "toggle" },
+}
+local REGISTRY_SECTIONS = { "Keybinds", "Combat", "Movement", "Catcher", "Visuals", "Misc" }
+
+local hudGui = nil
+local hudLabel = nil
+local hudText = ""
+local hudStamp = 0
+local keybindLabel = nil
+local keybindText = ""
+
+-- Text for one registry pass. rich = true gives coloured RichText for the HUD, false gives plain text for GlassUI labels.
+---@param rich boolean
+---@return string
+local function registryText(rich)
+	local lines = {}
+	for _, name in REGISTRY_SECTIONS do
+		local rows = {}
+		for _, entry in REGISTRY do
+			if entry.section ~= name then continue end
+
+			local flagEntry = ui and ui.Flags[entry.flag]
+			if not flagEntry then continue end
+
+			if entry.kind == "key" then
+				local key = typeof(flagEntry.Value) == "EnumItem" and flagEntry.Value.Name or "None"
+				table.insert(rows, rich and string.format("%s: <b>%s</b>", entry.label, key) or string.format("%s: %s", entry.label, key))
+			else
+				local on = flagEntry.Value == true
+				if rich then
+					table.insert(rows, on and string.format("<font color=\"#3ddc97\">●</font> %s", entry.label)
+						or string.format("<font color=\"#6b7280\">○ %s</font>", entry.label))
+				else
+					table.insert(rows, string.format("%s  %s", on and "[ON]  " or "[off]", entry.label))
+				end
+			end
+		end
+
+		if #rows > 0 then
+			table.insert(lines, rich and string.format("<b><font color=\"#5eead4\">%s</font></b>", string.upper(name)) or string.upper(name))
+			for _, row in rows do table.insert(lines, row) end
+			table.insert(lines, "")
+		end
+	end
+
+	return table.concat(lines, "\n")
+end
+
+-- Builds the small draggable panel once. It lives next to the hub's other GUI and is removed on unload.
+local function createHud()
+	if hudGui or not guiParent then return end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "HussValleyHud"
+	gui.ResetOnSpawn = false
+	gui.DisplayOrder = 50
+	gui.IgnoreGuiInset = true
+
+	local frame = Instance.new("Frame")
+	frame.Name = "Panel"
+	frame.AutomaticSize = Enum.AutomaticSize.Y
+	frame.Size = UDim2.fromOffset(230, 0)
+	frame.Position = UDim2.new(1, -250, 0, 70)
+	frame.BackgroundColor3 = Color3.fromRGB(14, 17, 26)
+	frame.BackgroundTransparency = 0.12
+	frame.BorderSizePixel = 0
+	frame.Active = true
+	frame.Parent = gui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 10)
+	corner.Parent = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(94, 234, 212)
+	stroke.Transparency = 0.45
+	stroke.Parent = frame
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingLeft, padding.PaddingRight = UDim.new(0, 10), UDim.new(0, 10)
+	padding.PaddingTop, padding.PaddingBottom = UDim.new(0, 8), UDim.new(0, 8)
+	padding.Parent = frame
+
+	local label = Instance.new("TextLabel")
+	label.BackgroundTransparency = 1
+	label.AutomaticSize = Enum.AutomaticSize.Y
+	label.Size = UDim2.new(1, 0, 0, 0)
+	label.RichText = true
+	label.TextWrapped = true
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextYAlignment = Enum.TextYAlignment.Top
+	label.Font = Enum.Font.GothamMedium
+	label.TextSize = 12
+	label.TextColor3 = Color3.fromRGB(226, 232, 240)
+	label.Text = ""
+	label.Parent = frame
+
+	-- Drag with the mouse or a finger.
+	local dragging, dragStart, startPosition = false, nil, nil
+	table.insert(connections, frame.InputBegan:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+		dragging, dragStart, startPosition = true, input.Position, frame.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then dragging = false end
+		end)
+	end))
+	table.insert(connections, game:GetService("UserInputService").InputChanged:Connect(function(input)
+		if not dragging then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+		local delta = input.Position - dragStart
+		frame.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y)
+	end))
+
+	gui.Parent = guiParent
+	hudGui, hudLabel = gui, label
+end
+
+-- Servers ---------------------------------------------------------------------------------------------------------------
+-- A floating browser that lists every public server with what it is doing right now (boss fight, in game, intermission,
+-- lobby). The phase comes from the game's own server list (ServerBrowserEvent "List"), which only answers in lobby
+-- servers. When it does not answer, Roblox's public server list fills in player counts and ping, without a status.
+
+local teleportService = game:GetService("TeleportService")
+local httpService = game:GetService("HttpService")
+
+local SERVER_PAGE_URL = "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&limit=100"
+local SERVER_REFRESH_GAP = 2
+local SERVER_AUTO_GAP = 15
+local SERVER_ROWS_SHOWN = 60
+local PANEL_WIDTH = 600
+local PANEL_HEIGHT = 470
+
+local PANEL_COLORS = {
+	bg = Color3.fromRGB(24, 19, 16),
+	card = Color3.fromRGB(34, 27, 23),
+	row = Color3.fromRGB(255, 244, 232),
+	text = Color3.fromRGB(248, 242, 236),
+	muted = Color3.fromRGB(182, 170, 158),
+	accent = Color3.fromRGB(70, 108, 226),
+	accent2 = Color3.fromRGB(122, 152, 244),
+	stroke = Color3.fromRGB(255, 240, 224),
+}
+
+local STATUS = {
+	boss = { label = "Boss fight", color = Color3.fromRGB(240, 96, 112) },
+	game = { label = "In game", color = Color3.fromRGB(96, 214, 150) },
+	intermission = { label = "Intermission", color = Color3.fromRGB(240, 190, 90) },
+	lobby = { label = "Lobby", color = Color3.fromRGB(122, 152, 244) },
+	starting = { label = "Starting", color = Color3.fromRGB(250, 160, 100) },
+	ending = { label = "Round ending", color = Color3.fromRGB(200, 140, 240) },
+	unknown = { label = "No status", color = Color3.fromRGB(182, 170, 158) },
+}
+local STATUS_ORDER = { "boss", "game", "starting", "intermission", "lobby", "ending", "unknown" }
+local STATUS_RANK = { boss = 1, game = 2, starting = 3, intermission = 4, lobby = 5, ending = 6, unknown = 7 }
+
+-- The game's own Session.Phase values (from its client scripts) and what each one means.
+local PHASE_STATUS = {
+	Lobby = "lobby", MapVote = "lobby", RankedLoadout = "lobby",
+	Intermission = "intermission",
+	Countdown = "starting", Prepare = "starting", SelectHero = "starting", HeroChoice = "starting", ChoiceReveal = "starting",
+	HeroRun = "game", GroupRun = "game", FinalRun = "game", RunResolution = "game",
+	Results = "ending",
+}
+local PHASE_LABEL = {
+	Lobby = "Lobby", MapVote = "Map vote", RankedLoadout = "Loadout", Intermission = "Lobby break", Countdown = "Starting",
+	Prepare = "Get ready", SelectHero = "Hero selection", HeroChoice = "Hero choice", ChoiceReveal = "Choice reveal",
+	HeroRun = "Hero run", GroupRun = "Crossing", FinalRun = "Final run", RunResolution = "Round complete", Results = "Results",
+}
+
+local servers = {
+	rows = {},
+	source = "",
+	notice = "Press Refresh to look for servers.",
+	busy = false,
+	dirty = true,
+	lastRefresh = -100,
+	lastAuto = 0,
+	gameRows = {},
+	gameAt = nil,
+	remote = nil,
+	filter = "all",
+	hideFull = false,
+	localKey = "unknown",
+	localText = "",
+	localKing = "",
+	king = nil,
+	localStamp = -10,
+	summary = nil,
+}
+local serverGui = nil
+local serverRoot = nil
+local serverList = nil
+local serverNotice = nil
+local serverCount = nil
+local serverThis = nil
+local serverChips = {}
+
+-- Maps the game's own phase text (or anything similar) to one of the status buckets above.
+---@param phase any
+---@return string
+local function classifyPhase(phase)
+	if PHASE_STATUS[phase] then return PHASE_STATUS[phase] end
+
+	local text = string.lower(tostring(phase or ""))
+	if text == "" or text == "nil" then return "unknown" end
+	if string.find(text, "boss", 1, true) or string.find(text, "king", 1, true) then return "boss" end
+	if string.find(text, "end", 1, true) or string.find(text, "result", 1, true) or string.find(text, "finish", 1, true) then return "ending" end
+	for _, word in { "inter", "wait", "vot", "countdown", "prepar", "start", "queue", "break" } do
+		if string.find(text, word, 1, true) then return "intermission" end
+	end
+	if string.find(text, "lobby", 1, true) then return "lobby" end
+	for _, word in { "round", "match", "active", "game", "play", "run", "progress", "live", "chase" } do
+		if string.find(text, word, 1, true) then return "game" end
+	end
+
+	return "unknown"
+end
+
+-- Short text for the Fallen King event: how full the cauldron is and what stage the summon is at.
+---@param king table?
+---@return string
+servers.kingText = function(king)
+	if type(king) ~= "table" or not king.progress then return "" end
+
+	local text = string.format("Fallen King %d%%", math.floor(king.progress * 100 + 0.5))
+	if king.state and king.state ~= "" then text = text .. "  ·  " .. tostring(king.state) end
+	if king.won then text = text .. "  ·  beaten" end
+	return text
+end
+
+-- What THIS server is doing, read from the state the game replicates to us. Cheap, polled about once a second.
+local function updateLocalStatus()
+	if os.clock() - servers.localStamp < 1 then return end
+	servers.localStamp = os.clock()
+
+	local role = localPlayer:GetAttribute("GameRole")
+	local runState = localPlayer:GetAttribute("RunState")
+
+	-- The server's own phase and the Fallen King event live in ReplicatedStorage.ChickenOrHero.Game.
+	local chicken = replicatedStorage:FindFirstChild("ChickenOrHero")
+	local gameFolder = chicken and chicken:FindFirstChild("Game")
+	local session = gameFolder and gameFolder:FindFirstChild("Session")
+	local kingEvent = gameFolder and gameFolder:FindFirstChild("FallenKingEvent")
+	local phase = session and session:GetAttribute("Phase")
+
+	local king = {
+		progress = gameFolder and tonumber(gameFolder:GetAttribute("FallenKingProgress")),
+		state = kingEvent and kingEvent:GetAttribute("SummonState"),
+		won = gameFolder ~= nil and gameFolder:GetAttribute("FallenKingLiveWon") == true,
+		pot = kingEvent and tonumber(kingEvent:GetAttribute("SummonPot")),
+		target = kingEvent and tonumber(kingEvent:GetAttribute("SummonTarget")),
+	}
+	servers.king = king
+
+	local key = "unknown"
+	local fighting = king.state == "Summoning" or king.state == "Live" or king.state == "Fighting" or king.state == "Boss"
+	if fighting then
+		key = "boss"
+	elseif phase then
+		key = classifyPhase(phase)
+	elseif runState == "Active" or runState == "Caught" or runState == "Safe" then
+		key = "game"
+	elseif runState == "Waiting" then
+		key = "intermission"
+	elseif runState == "Lobby" or role == "Lobby" then
+		key = "lobby"
+	end
+
+	local text = fighting and ("Fallen King: " .. tostring(king.state)) or (phase and (PHASE_LABEL[phase] or tostring(phase))) or string.format("%s / %s", tostring(role or "?"), tostring(runState or "?"))
+	local kingText = servers.kingText(king)
+	if key ~= servers.localKey or text ~= servers.localText or kingText ~= servers.localKing then
+		servers.localKey, servers.localText, servers.localKing = key, text, kingText
+		servers.dirty = true
+	end
+end
+
+---@param title string
+---@param text string
+local function serverNotify(title, text)
+	if uiWindow then pcall(function() uiWindow:Notify({ Title = title, Text = text, Duration = 4 }) end) end
+end
+
+-- Looks through a server-list row (two levels deep) for anything about the Fallen King / boss event: a progress number
+-- (0-1 or a percent) and a state string. The list's exact fields are not documented, so this goes by key names.
+---@param raw table
+---@return table?
+local function findKingInfo(raw)
+	local info = { progress = false, state = false }
+	local function scan(tableValue, depth)
+		for key, value in tableValue do
+			local name = string.lower(tostring(key))
+			if type(value) == "table" and depth < 2 then
+				scan(value, depth + 1)
+			elseif string.find(name, "king", 1, true) or string.find(name, "boss", 1, true) or string.find(name, "summon", 1, true) or string.find(name, "cauldron", 1, true) then
+				if type(value) == "number" and (string.find(name, "progress", 1, true) or string.find(name, "percent", 1, true)) then
+					info.progress = value > 1.5 and value / 100 or value
+				elseif type(value) == "string" and not info.state then
+					info.state = value
+				end
+			end
+		end
+	end
+	scan(raw, 0)
+
+	if not info.progress and not info.state then return nil end
+	return info
+end
+
+-- Normalises one row of the game's own list.
+---@param raw table
+---@return table
+local function gameRow(raw)
+	local location = type(raw.location) == "table" and raw.location or nil
+	local region = location and (location.country or "Region unknown") or (raw.region or "Region unknown")
+	if location and location.subdivision and location.subdivision ~= "" then region = region .. " · " .. location.subdivision end
+
+	return {
+		id = raw.id,
+		source = "game",
+		players = tonumber(raw.players) or 0,
+		capacity = tonumber(raw.capacity) or 0,
+		phase = PHASE_LABEL[raw.phase] or tostring(raw.phase or ""),
+		status = classifyPhase(raw.phase),
+		region = region,
+		ping = tonumber(raw.averagePing),
+		current = raw.current == true,
+		full = raw.full == true,
+		king = findKingInfo(raw),
+	}
+end
+
+-- Roblox's public server list: player counts and ping only.
+---@return table?, string?
+local function fetchPublicRows()
+	local success, response = pcall(request, { Url = string.format(SERVER_PAGE_URL, PLACE_ID), Method = "GET" })
+	if not success or type(response) ~= "table" then return nil, "Could not reach Roblox's server list." end
+	if response.StatusCode == 429 then return nil, "Roblox is rate limiting the server list. Wait a moment and refresh." end
+	if response.StatusCode ~= 200 then return nil, "Roblox's server list answered " .. tostring(response.StatusCode) .. "." end
+
+	local decoded, data = pcall(function() return httpService:JSONDecode(response.Body) end)
+	if not decoded or type(data) ~= "table" or type(data.data) ~= "table" then return nil, "Roblox's server list came back unreadable." end
+
+	local rows = {}
+	for _, entry in data.data do
+		table.insert(rows, {
+			id = entry.id,
+			source = "roblox",
+			players = tonumber(entry.playing) or 0,
+			capacity = tonumber(entry.maxPlayers) or 0,
+			phase = "",
+			status = "unknown",
+			region = "Server " .. string.sub(tostring(entry.id), 1, 6),
+			ping = tonumber(entry.ping),
+			current = entry.id == game.JobId,
+			full = (tonumber(entry.playing) or 0) >= (tonumber(entry.maxPlayers) or 1),
+		})
+	end
+
+	return rows
+end
+
+local function refreshServers()
+	if servers.busy or os.clock() - servers.lastRefresh < SERVER_REFRESH_GAP then return end
+	servers.busy = true
+	servers.lastRefresh = os.clock()
+	servers.notice = "Looking for servers..."
+	servers.dirty = true
+
+	local askedAt = os.clock()
+	if servers.remote then pcall(function() servers.remote:FireServer("List") end) end
+
+	task.spawn(function()
+		local publicRows, failure = fetchPublicRows()
+
+		-- Give the game's own list a few seconds to answer; it never does outside the lobby.
+		local waited = 0
+		while waited < 4 and not (servers.gameAt and servers.gameAt >= askedAt) do
+			task.wait(0.25)
+			waited += 0.25
+		end
+
+		if servers.gameAt and servers.gameAt >= askedAt and #servers.gameRows > 0 then
+			servers.rows, servers.source = servers.gameRows, "game"
+			servers.notice = "Status comes straight from the game's own server list."
+		elseif publicRows then
+			servers.rows, servers.source = publicRows, "roblox"
+			servers.notice = "The game only shares what each server is doing with players in the lobby. Showing Roblox's list instead: player counts and ping, no status. Join from the lobby to see boss fights and rounds."
+		else
+			servers.notice = failure or "No servers found."
+		end
+
+		servers.busy = false
+		servers.dirty = true
+	end)
+end
+
+---@param row table
+local function joinServer(row)
+	if row.current then return serverNotify("Servers", "You are already in this server") end
+	if row.full then return serverNotify("Servers", "That server is full") end
+
+	if row.source == "game" and servers.remote then
+		pcall(function() servers.remote:FireServer("Join", row.id) end)
+		serverNotify("Servers", "Asking the game to switch servers")
+	else
+		local success = pcall(function() teleportService:TeleportToPlaceInstance(PLACE_ID, row.id, localPlayer) end)
+		serverNotify("Servers", success and "Teleporting..." or "Could not teleport to that server")
+	end
+end
+
+---@param className string
+---@param props table
+---@param parent Instance?
+---@return Instance
+local function make(className, props, parent)
+	local object = Instance.new(className)
+	for key, value in props do object[key] = value end
+	object.Parent = parent
+	return object
+end
+
+---@param parent Instance
+---@param text string
+---@param size number
+---@param color Color3
+---@param font Enum.Font
+---@param props table?
+---@return TextLabel
+local function makeLabel(parent, text, size, color, font, props)
+	local label = make("TextLabel", {
+		BackgroundTransparency = 1,
+		Text = text,
+		TextSize = size,
+		TextColor3 = color,
+		Font = font,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	}, parent)
+	if props then for key, value in props do label[key] = value end end
+	return label
+end
+
+local function sortedRows()
+	local shown = {}
+	for _, row in servers.rows do
+		if servers.hideFull and row.full and not row.current then continue end
+		if servers.filter ~= "all" and row.status ~= servers.filter and not row.current then continue end
+		table.insert(shown, row)
+	end
+
+	table.sort(shown, function(first, second)
+		if first.current ~= second.current then return first.current end
+		if first.full ~= second.full then return not first.full end
+		if STATUS_RANK[first.status] ~= STATUS_RANK[second.status] then return STATUS_RANK[first.status] < STATUS_RANK[second.status] end
+		if first.players ~= second.players then return first.players > second.players end
+		return tostring(first.id) < tostring(second.id)
+	end)
+
+	return shown
+end
+
+local function renderServers()
+	if not serverGui then return end
+
+	-- Our own server is known better than any list: use the live local state for its row.
+	for _, row in servers.rows do
+		if row.current or row.id == game.JobId then
+			row.current = true
+			row.status = servers.localKey
+			row.phase = servers.localText
+			row.king = servers.king
+		end
+	end
+
+	local counts = {}
+	for _, row in servers.rows do counts[row.status] = (counts[row.status] or 0) + 1 end
+	servers.counts = counts
+
+	if servers.summary then
+		local parts = {}
+		for _, key in STATUS_ORDER do
+			if counts[key] and (key ~= "unknown" or servers.source == "roblox") then table.insert(parts, string.format("%s %d", STATUS[key].label, counts[key])) end
+		end
+		pcall(function() servers.summary:SetText(#parts > 0 and table.concat(parts, "   ·   ") or "No servers loaded yet.") end)
+	end
+
+	local mine = STATUS[servers.localKey]
+	serverThis.Text = string.format("THIS SERVER   %s   ·   %s%s", string.upper(mine.label), servers.localText, servers.localKing ~= "" and ("   ·   " .. servers.localKing) or "")
+	serverThis.TextColor3 = mine.color
+	serverNotice.Text = servers.notice
+
+	for key, chip in serverChips do
+		local active = key == "hideFull" and servers.hideFull or key == servers.filter
+		chip.BackgroundTransparency = active and 0.1 or 0.9
+		chip.TextColor3 = active and PANEL_COLORS.text or PANEL_COLORS.muted
+		if key ~= "all" and key ~= "hideFull" and counts[key] then chip.Text = string.format("%s  %d", STATUS[key].label, counts[key]) end
+	end
+
+	for _, child in serverList:GetChildren() do
+		if child:IsA("GuiObject") then child:Destroy() end
+	end
+
+	local shown = sortedRows()
+	serverCount.Text = string.format("%d of %d servers", math.min(#shown, SERVER_ROWS_SHOWN), #servers.rows)
+
+	for index = 1, math.min(#shown, SERVER_ROWS_SHOWN) do
+		local row = shown[index]
+		local status = STATUS[row.status]
+		local frame = make("Frame", { Size = UDim2.new(1, -6, 0, 70), BackgroundColor3 = PANEL_COLORS.row, BackgroundTransparency = row.current and 0.86 or 0.93, BorderSizePixel = 0, LayoutOrder = index }, serverList)
+		make("UICorner", { CornerRadius = UDim.new(0, 10) }, frame)
+		local accent = make("Frame", { Size = UDim2.new(0, 4, 1, -16), Position = UDim2.fromOffset(8, 8), BackgroundColor3 = status.color, BorderSizePixel = 0 }, frame)
+		make("UICorner", { CornerRadius = UDim.new(0, 2) }, accent)
+
+		makeLabel(frame, (row.current and "YOUR SERVER  ·  " or "") .. row.region, 13, PANEL_COLORS.text, Enum.Font.GothamBold, { Position = UDim2.fromOffset(24, 8), Size = UDim2.new(1, -260, 0, 18) })
+		local detail = (row.phase ~= "" and row.phase ~= status.label) and (status.label .. "  ·  " .. row.phase) or status.label
+		makeLabel(frame, detail, 12, status.color, Enum.Font.GothamMedium, { Position = UDim2.fromOffset(24, 28), Size = UDim2.new(1, -260, 0, 16) })
+
+		-- Fallen King progress: the game's cauldron percentage (can pass 100%) with a bar.
+		local kingLine, kingFill = "Fallen King: not shared by the list", 0
+		if row.king and row.king.progress then
+			kingLine = servers.kingText(row.king)
+			kingFill = math.clamp(row.king.progress, 0, 1)
+		elseif row.king and row.king.state then
+			kingLine = "Fallen King  ·  " .. tostring(row.king.state)
+		end
+		makeLabel(frame, kingLine, 11, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Position = UDim2.fromOffset(24, 46), Size = UDim2.new(1, -260, 0, 14) })
+		local barBack = make("Frame", { Position = UDim2.new(1, -230, 0, 51), Size = UDim2.fromOffset(120, 6), BackgroundColor3 = PANEL_COLORS.row, BackgroundTransparency = 0.88, BorderSizePixel = 0 }, frame)
+		make("UICorner", { CornerRadius = UDim.new(1, 0) }, barBack)
+		local barFill = make("Frame", { Size = UDim2.fromScale(kingFill, 1), BackgroundColor3 = kingFill >= 1 and Color3.fromRGB(240, 96, 112) or PANEL_COLORS.accent2, BorderSizePixel = 0 }, barBack)
+		make("UICorner", { CornerRadius = UDim.new(1, 0) }, barFill)
+		makeLabel(frame, string.format("%d / %d players", row.players, row.capacity), 12, PANEL_COLORS.text, Enum.Font.GothamMedium, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -96, 0, 8), Size = UDim2.fromOffset(130, 18), TextXAlignment = Enum.TextXAlignment.Right })
+		makeLabel(frame, row.ping and string.format("%d ms", row.ping) or "ping n/a", 11, PANEL_COLORS.muted, Enum.Font.GothamMedium, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -96, 0, 28), Size = UDim2.fromOffset(130, 16), TextXAlignment = Enum.TextXAlignment.Right })
+
+		local blocked = row.current or row.full
+		local join = make("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -10, 0.5, 0),
+			Size = UDim2.fromOffset(70, 30),
+			BackgroundColor3 = PANEL_COLORS.accent,
+			BackgroundTransparency = blocked and 0.7 or 0.05,
+			AutoButtonColor = false,
+			Text = row.current and "HERE" or (row.full and "FULL" or "JOIN"),
+			TextSize = 12,
+			Font = Enum.Font.GothamBold,
+			TextColor3 = PANEL_COLORS.text,
+			BorderSizePixel = 0,
+		}, frame)
+		make("UICorner", { CornerRadius = UDim.new(0, 8) }, join)
+		join.Activated:Connect(function() joinServer(row) end)
+	end
+
+	if #shown == 0 then
+		local empty = makeLabel(serverList, #servers.rows == 0 and "No servers loaded yet." or "No server matches this filter.", 13, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Size = UDim2.new(1, 0, 0, 40), TextXAlignment = Enum.TextXAlignment.Center })
+		empty.LayoutOrder = 1
+	end
+end
+
+local function createServerGui()
+	if serverGui or not guiParent then return end
+
+	serverGui = make("ScreenGui", { Name = "HussValleyServers", ResetOnSpawn = false, DisplayOrder = 1001, IgnoreGuiInset = true, Enabled = false }, nil)
+	serverRoot = make("Frame", { Name = "Root", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(PANEL_WIDTH, PANEL_HEIGHT), BackgroundColor3 = PANEL_COLORS.bg, BackgroundTransparency = 0, BorderSizePixel = 0, Active = true }, serverGui)
+	make("UICorner", { CornerRadius = UDim.new(0, 18) }, serverRoot)
+	make("UIStroke", { Color = PANEL_COLORS.stroke, Transparency = 0.88 }, serverRoot)
+
+	local header = make("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundTransparency = 1, Active = true }, serverRoot)
+	makeLabel(header, "Servers", 30, PANEL_COLORS.text, Enum.Font.Garamond, { Position = UDim2.fromOffset(20, 8), Size = UDim2.fromOffset(160, 36) })
+	serverCount = makeLabel(header, "", 12, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Position = UDim2.fromOffset(150, 20), Size = UDim2.fromOffset(180, 18) })
+
+	local function headerButton(text, width, offset, callback)
+		local button = make("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, offset, 0, 13), Size = UDim2.fromOffset(width, 30), BackgroundColor3 = PANEL_COLORS.accent, BackgroundTransparency = 0.08, AutoButtonColor = false, Text = text, TextSize = 12, Font = Enum.Font.GothamBold, TextColor3 = PANEL_COLORS.text, BorderSizePixel = 0 }, header)
+		make("UICorner", { CornerRadius = UDim.new(0, 9) }, button)
+		button.Activated:Connect(callback)
+		return button
+	end
+	headerButton("X", 30, -14, function() serverGui.Enabled = false end)
+	headerButton("REFRESH", 86, -52, refreshServers)
+
+	serverThis = makeLabel(serverRoot, "", 13, PANEL_COLORS.text, Enum.Font.GothamBold, { Position = UDim2.fromOffset(20, 58), Size = UDim2.new(1, -40, 0, 20) })
+
+	local chips = make("Frame", { Position = UDim2.fromOffset(20, 84), Size = UDim2.new(1, -40, 0, 28), BackgroundTransparency = 1 }, serverRoot)
+	make("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, chips)
+	local function chip(key, text, width, order)
+		local button = make("TextButton", { Size = UDim2.fromOffset(width, 28), BackgroundColor3 = PANEL_COLORS.accent, BackgroundTransparency = 0.9, AutoButtonColor = false, Text = text, TextSize = 11, Font = Enum.Font.GothamBold, TextColor3 = PANEL_COLORS.muted, BorderSizePixel = 0, LayoutOrder = order }, chips)
+		make("UICorner", { CornerRadius = UDim.new(0, 8) }, button)
+		button.Activated:Connect(function()
+			if key == "hideFull" then
+				servers.hideFull = not servers.hideFull
+			else
+				servers.filter = key
+			end
+			servers.dirty = true
+		end)
+		serverChips[key] = button
+	end
+	chip("all", "All", 46, 1)
+	chip("boss", "Boss fight", 92, 2)
+	chip("game", "In game", 84, 3)
+	chip("intermission", "Intermission", 104, 4)
+	chip("lobby", "Lobby", 68, 5)
+	chip("hideFull", "Hide full", 76, 6)
+
+	serverList = make("ScrollingFrame", { Position = UDim2.fromOffset(20, 120), Size = UDim2.new(1, -40, 1, -184), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = PANEL_COLORS.accent2, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y }, serverRoot)
+	make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, serverList)
+
+	serverNotice = makeLabel(serverRoot, "", 11, PANEL_COLORS.muted, Enum.Font.GothamMedium, { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 20, 1, -10), Size = UDim2.new(1, -40, 0, 48), TextWrapped = true, TextTruncate = Enum.TextTruncate.None, TextYAlignment = Enum.TextYAlignment.Bottom })
+
+	-- Drag the panel by its header.
+	local dragging, dragStart, startPosition = false, nil, nil
+	table.insert(connections, header.InputBegan:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+		dragging, dragStart, startPosition = true, input.Position, serverRoot.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then dragging = false end
+		end)
+	end))
+	table.insert(connections, userInputService.InputChanged:Connect(function(input)
+		if not dragging then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+		local delta = input.Position - dragStart
+		serverRoot.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y)
+	end))
+
+	serverGui.Parent = guiParent
+end
+
+local function toggleServerBrowser()
+	createServerGui()
+	if not serverGui then return end
+
+	serverGui.Enabled = not serverGui.Enabled
+	if serverGui.Enabled then
+		servers.dirty = true
+		refreshServers()
+	end
+end
+
+-- Called every frame from the main loop (identity 8): keeps the status current, auto-refreshes while open, redraws on change.
+local function serversTick()
+	updateLocalStatus()
+
+	if serverGui and serverGui.Enabled then
+		local entry = ui and ui.Flags.serverAuto
+		if (entry == nil or entry.Value == true) and os.clock() - servers.lastAuto >= SERVER_AUTO_GAP then
+			servers.lastAuto = os.clock()
+			refreshServers()
+		end
+	end
+
+	if servers.dirty and serverGui then
+		servers.dirty = false
+		renderServers()
+	end
+end
+
+-- Brings the HUD and the Settings keybind list up to date with the flags. Cheap enough to poll, which also catches
+-- changes made by config loads, the fair-play auto-off and snap-back protection without any extra hooks.
+local function refreshHud()
+	if os.clock() - hudStamp < 0.25 then return end
+	hudStamp = os.clock()
+
+	pcall(function()
+		if not ui then return end
+
+		if not hudGui then createHud() end
+		if hudGui then hudGui.Enabled = flag("hud") end
+		if hudLabel and hudGui and hudGui.Enabled then
+			local text = registryText(true)
+			if text ~= hudText then hudText, hudLabel.Text = text, text end
+		end
+
+		if keybindLabel then
+			local plain = registryText(false)
+			if plain ~= keybindText then keybindText = plain keybindLabel:SetText(plain) end
+		end
+	end)
+end
+
 ---@param deltaTime number
 local function step(deltaTime)
 	if guardTripped then
@@ -1065,6 +1806,9 @@ local function step(deltaTime)
 		espTimer = 0
 		updateEsp()
 	end
+
+	refreshHud()
+	serversTick()
 
 	if tickTimer < CONFIG.tickRate then return end
 	tickTimer = 0
@@ -1113,66 +1857,33 @@ local function setupAntiAfk()
 	end))
 end
 
--- Local glassui.lua first, the public copy as fallback.
+-- Local V18UI.lua first, the public copy as fallback.
 ---@return table
 local function loadLibrary()
 	local success, library = pcall(function()
 		local chunk = loadstring(readfile(UI_FILE))
 		return chunk and chunk()
 	end)
-	if success and type(library) == "table" then return library end
+	if success and type(library) == "table" and library.CreateWindow then return library end
 
 	local response = request({ Url = UI_URL, Method = "GET" })
 	local chunk = loadstring(response.Body)
-	assert(chunk, "GlassUI failed to compile")
+	assert(chunk, "V18UI failed to compile")
 	return chunk()
 end
 
 local CONFIG_FOLDER = "HussValley/configs"
 local AUTOLOAD_FILE = "HussValley/autoload.txt"
 
--- Disk file for a config slot such as "Config 1".
----@param slot string
----@return string
-local function configPath(slot)
-	local name = string.gsub(string.lower(slot), "%s+", "_")
-	return CONFIG_FOLDER .. "/" .. name .. ".json"
-end
-
 local function notify(title, text)
 	if uiWindow then uiWindow:Notify({ Title = title, Text = text, Duration = 4 }) end
 end
 
--- Writes every saved-able switch, slider, dropdown and keybind of the window to the slot. The config controls
--- themselves (flags starting with cfg_) are left out.
----@param slot string
-local function saveConfig(slot)
-	local data = {}
-	for name, entry in ui.Flags do
-		if string.sub(name, 1, 4) == "cfg_" then continue end
-
-		local value = entry.Value
-		if typeof(value) == "EnumItem" then value = value.Name end
-		if type(value) == "boolean" or type(value) == "number" or type(value) == "string" then data[name] = value end
-	end
-
-	local success, failure = pcall(function()
-		if not isfolder("HussValley") then makefolder("HussValley") end
-		if not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
-		writefile(configPath(slot), game:GetService("HttpService"):JSONEncode(data))
-	end)
-
-	if success then
-		notify("Config saved", slot)
-	else
-		notify("Could not save", tostring(failure))
-	end
-end
-
----@param slot string
+-- Applies a config the Settings tab saved (HussValley/configs/<name>.json); used by "load on start".
+---@param name string
 ---@param quiet boolean?
-local function loadConfig(slot, quiet)
-	local path = configPath(slot)
+local function loadConfig(name, quiet)
+	local path = CONFIG_FOLDER .. "/" .. name .. ".json"
 	local success, data = pcall(function()
 		if not isfile(path) then return nil end
 
@@ -1180,44 +1891,70 @@ local function loadConfig(slot, quiet)
 	end)
 
 	if not success or type(data) ~= "table" then
-		if not quiet then notify("No config", slot .. " has nothing saved yet") end
+		if not quiet then notify("No config", name .. " has nothing saved yet") end
 		return
 	end
 
 	local applied = 0
-	for name, value in data do
-		local entry = ui.Flags[name]
-		if entry and string.sub(name, 1, 4) ~= "cfg_" and pcall(entry.Set, value) then applied += 1 end
+	for flagName, value in data do
+		local entry = ui.Flags[flagName]
+		if entry and string.sub(flagName, 1, 4) ~= "cfg_" and pcall(entry.Set, value) then applied += 1 end
 	end
 
-	if not quiet then notify("Config loaded", string.format("%s (%d settings)", slot, applied)) end
+	if not quiet then notify("Config loaded", string.format("%s (%d settings)", name, applied)) end
 end
 
----@param slot string
-local function deleteConfig(slot)
-	local success = pcall(function()
-		if isfile(configPath(slot)) then delfile(configPath(slot)) end
-	end)
-	notify(success and "Config deleted" or "Could not delete", slot)
+---@param role string?
+---@return string, number, string
+local function roleCard()
+	local role = localPlayer:GetAttribute("GameRole")
+	local runState = localPlayer:GetAttribute("RunState")
+	local alpha = (role == "Runner" or role == "Catcher") and runState == "Active" and 1 or 0.12
+	return tostring(role or "?"), alpha, tostring(runState or "")
 end
 
 local function buildUi()
 	ui = loadLibrary()
 	local window = ui:CreateWindow({
 		Title = "Huss Valley",
-		Subtitle = "Auto Dodge  /  Immortal  /  Movement",
-		-- Pressing "Unload UI" in the window's Settings tab unloads the whole script, not just the window.
+		Subtitle = "Dodge  /  Movement  /  Servers",
+		ToggleKey = Enum.KeyCode.RightShift,
+		-- Pressing "Unload Script" in Settings unloads the whole script, not just the window.
 		OnDestroy = function()
 			if not detaching then HussValley.detach() end
 		end,
 	})
 	uiWindow = window
 
-	-- A hub overlay should not blur the game while you play; the Settings tab can turn it back on.
+	-- A hub overlay should not blur the game while you play; Settings can turn it back on.
 	ui.Flags.ui_blur.Set(false)
 
+	-- Overview ----------------------------------------------------------------------------------------------------
+	local overview = window:CreateTab("Overview", "layout-dashboard", "Your hub at a glance")
+	overview:AddStatRow({
+		{ Title = "Role", Get = roleCard },
+		{ Title = "Auto Dodge", Get = function()
+			local on = flag("autoDodge") or flag("immortal")
+			return on and (flag("immortal") and "IMMORTAL" or "ON") or "OFF", on and 1 or 0.04, flag("proximity") and "proximity on" or ""
+		end },
+		{ Title = "This server", Get = function()
+			local status = STATUS[servers.localKey]
+			return status.label, servers.localKey == "unknown" and 0.04 or 1, servers.localText
+		end },
+	})
+	overview:AddSection("Keybinds")
+	overview:AddLabel("Every toggle has a key chip on its row: click it, press a key. Esc or Backspace clears it. The keybind list (Insert) shows what is on, even with the menu closed.")
+	overview:AddSection("Panic")
+	overview:AddButton({ Text = "Turn every feature off", Callback = function()
+		for name, entry in ui.Flags do
+			if entry.Type == "Toggle" and string.sub(name, 1, 3) ~= "ui_" and entry.Value then entry.Set(false) end
+		end
+		window:Notify({ Title = "Panic", Text = "All features disabled" })
+	end })
+
+	-- Survival ----------------------------------------------------------------------------------------------------
 	window:CreateCategory("Survival")
-	local combat = window:CreateTab("Combat")
+	local combat = window:CreateTab("Combat", "swords", "Auto dodge and immortal")
 	combat:AddSection("Dodge")
 	combat:AddToggle({ Text = "Auto Dodge", Default = false, Flag = "autoDodge" })
 	combat:AddToggle({ Text = "Auto Ability (Q): runners when the dash is spent, catchers when a runner is close", Default = false, Flag = "autoAbility" })
@@ -1231,16 +1968,20 @@ local function buildUi()
 	combat:AddSlider({ Text = "Danger margin (studs)", Min = 0, Max = 4, Default = 0, Increment = 0.5, Flag = "margin" })
 	combat:AddSection("Immortal")
 	combat:AddToggle({ Text = "Immortal (best effort)", Default = false, Flag = "immortal", Callback = function(on) movement.immortal = on end })
-	combat:AddToggle({ Text = "Immortal: no cooldown + fastest dash", Default = true, Flag = "immortalTweaks", Callback = function(on) movement.immortalTweaks = on end })
-	combat:AddToggle({ Text = "Immortal: also use abilities (Q)", Default = true, Flag = "immortalAbility", Callback = function(on) movement.immortalAbility = on end })
+	combat:AddToggle({ Text = "Immortal: no cooldown + fastest dash", Default = true, Flag = "immortalTweaks", NoList = true, Callback = function(on) movement.immortalTweaks = on end })
+	combat:AddToggle({ Text = "Immortal: also use abilities (Q)", Default = true, Flag = "immortalAbility", NoList = true, Callback = function(on) movement.immortalAbility = on end })
+	combat:AddToggle({ Text = "Immortal: lead running catchers (predict where the swing starts)", Default = true, Flag = "immortalPredict", NoList = true, Callback = function(on) movement.immortalPredict = on end })
+	combat:AddToggle({ Text = "Immortal: wider zone for fast catchers", Default = true, Flag = "immortalSpeedMargin", NoList = true, Callback = function(on) movement.immortalSpeedMargin = on end })
+	combat:AddToggle({ Text = "Immortal: prefer landing spots far from every catcher", Default = true, Flag = "immortalBias", NoList = true, Callback = function(on) movement.immortalBias = on end })
 	combat:AddLabel("Dashes out of every attack near you from any side, even two at once, with no dash cooldown and the fastest dash the server accepts (about 0.04 s). Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow.")
 
-	window:CreateCategory("Movement")
-	local move = window:CreateTab("Movement")
+	-- Player ------------------------------------------------------------------------------------------------------
+	window:CreateCategory("Player")
+	local move = window:CreateTab("Movement", "wind", "Dash, speed and acceleration")
 	move:AddSection("Dash cooldown")
 	move:AddToggle({ Text = "No dash cooldown", Default = false, Flag = "noCooldown", Callback = function(on) movement.noCooldown = on end })
 	move:AddSlider({ Text = "Cooldown cap (s, 0 = none)", Min = 0, Max = 0.7, Default = 0, Increment = 0.05, Flag = "cooldownGap", Callback = function(value) movement.cooldownGap = value end })
-	move:AddToggle({ Text = "Skip dash recovery", Default = true, Flag = "skipRecovery", Callback = function(on) movement.skipRecovery = on end })
+	move:AddToggle({ Text = "Skip dash recovery", Default = true, Flag = "skipRecovery", NoList = true, Callback = function(on) movement.skipRecovery = on end })
 	move:AddSection("Dash distance")
 	move:AddToggle({ Text = "Longer dash", Default = false, Flag = "longDash", Callback = function(on) movement.longDash = on end })
 	move:AddSlider({ Text = "Distance multiplier", Min = 1.1, Max = 3, Default = 1.5, Increment = 0.1, Flag = "dashScale", Callback = function(value) movement.dashScale = value end })
@@ -1262,11 +2003,10 @@ local function buildUi()
 	move:AddToggle({ Text = "Speed tuning", Default = false, Flag = "speed", Callback = function(on) movement.speed = on end })
 	move:AddSlider({ Text = "Speed boost (%)", Min = 0, Max = 25, Default = 5, Increment = 1, Flag = "speedBoost", Callback = function(value) movement.speedBoost = value end })
 	move:AddSection("Safety")
-	move:AddToggle({ Text = "Auto-off on a fair-play warning", Default = true, Flag = "guardStop" })
+	move:AddToggle({ Text = "Auto-off on a fair-play warning", Default = true, Flag = "guardStop", NoList = true })
 	move:AddLabel("The server watches movement. Short tests of no cooldown, a 1.5x dash and +10% speed drew no warning, but the further you push past the game's own numbers the more likely one gets. If it warns you, these switch themselves off.")
 
-	window:CreateCategory("Catcher")
-	local catch = window:CreateTab("Catcher")
+	local catch = window:CreateTab("Catcher", "target", "Tackle, dash and reach")
 	catch:AddSection("Tackle")
 	catch:AddToggle({ Text = "Auto Tackle (dives at the closest runner in range)", Default = false, Flag = "autoTackle", Callback = function(on) tackle.auto = on end })
 	catch:AddSlider({ Text = "Tackle range (studs)", Min = 3, Max = 9, Default = 5.5, Increment = 0.5, Flag = "tackleRange", Callback = function(value) tackle.range = value end })
@@ -1283,37 +2023,88 @@ local function buildUi()
 	catch:AddSlider({ Text = "Extra reach (studs)", Min = 0.5, Max = 2, Default = 1.5, Increment = 0.5, Flag = "tackleReach", Callback = function(value) tackle.reach = value syncReach() end })
 	catch:AddLabel("Catches are decided by the server, so a hitbox cannot be resized from here. This instead starts each tackle a little further forward than you are (the server tolerates about 2.5 studs of position error), which lengthens your effective reach by that much. Untested against the server's hit rules; it switches itself off on a snap-back or a fair-play warning.")
 
-	window:CreateCategory("Utility")
-	local visuals = window:CreateTab("Visuals")
-	visuals:AddToggle({ Text = "Threat ESP", Default = false, Flag = "esp" })
-	local misc = window:CreateTab("Misc")
-	misc:AddToggle({ Text = "Anti-AFK", Default = true, Flag = "antiAfk" })
+	-- Servers -----------------------------------------------------------------------------------------------------
+	window:CreateCategory("Servers")
+	local serverTab = window:CreateTab("Servers", "gauge", "What every server is doing")
+	serverTab:AddStatRow({
+		{ Title = "This server", Get = function()
+			local status = STATUS[servers.localKey]
+			return status.label, servers.localKey == "unknown" and 0.04 or 1, servers.localText
+		end },
+		{ Title = "Servers found", Get = function()
+			local total = #servers.rows
+			return tostring(total), math.clamp(total / 30, 0, 1), servers.source == "game" and "with status" or (servers.source == "roblox" and "no status" or "press refresh")
+		end },
+		{ Title = "Fallen King", Get = function()
+			local king = servers.king
+			if not (king and king.progress) then return "-", 0.04, "this server" end
+			return string.format("%d%%", math.floor(king.progress * 100 + 0.5)), math.clamp(king.progress, 0, 1), tostring(king.state or "")
+		end },
+		{ Title = "Boss fights", Get = function()
+			local bosses = servers.counts and servers.counts.boss or 0
+			return tostring(bosses), math.clamp(bosses / 5, 0, 1), servers.source == "roblox" and "needs lobby" or ""
+		end },
+	})
+	serverTab:AddSection("Server browser")
+	serverTab:AddButton({ Text = "Open server browser", Callback = toggleServerBrowser })
+	serverTab:AddKeybind({ Text = "Open / close key", Default = Enum.KeyCode.K, Flag = "serverKey", Pressed = toggleServerBrowser })
+	serverTab:AddToggle({ Text = "Auto refresh every 15 s while open", Default = true, Flag = "serverAuto", NoList = true })
+	serverTab:AddSection("Right now")
+	servers.summary = serverTab:AddLabel("No servers loaded yet. Open the browser to load them.")
+	serverTab:AddLabel("Each row shows the region, how many players, ping and what the server is doing: Boss fight, In game, Intermission or Lobby. Join switches you to that server. Your own server is always marked and uses live data.")
+	serverTab:AddButton({ Text = "Copy this server's JobId", Callback = function()
+		setclipboard(game.JobId)
+		window:Notify({ Title = "Copied", Text = game.JobId })
+	end })
 
-	-- Config section in the built-in Settings tab (older GlassUI copies without it get it under Misc).
+	-- Visuals -----------------------------------------------------------------------------------------------------
+	window:CreateCategory("Visuals")
+	local visuals = window:CreateTab("Visuals", "eye", "See threats through walls")
+	visuals:AddSection("ESP")
+	visuals:AddToggle({ Text = "Threat ESP", Default = false, Flag = "esp" })
+
+	-- Misc --------------------------------------------------------------------------------------------------------
+	window:CreateCategory("Misc")
+	local misc = window:CreateTab("Misc", "sliders-horizontal", "Utilities")
+	misc:AddSection("Session")
+	misc:AddToggle({ Text = "Anti-AFK", Default = true, Flag = "antiAfk", NoList = true })
+	-- The V18UI keybind list (Insert) replaces the old panel; keep the old one available but off by default.
+	misc:AddToggle({ Text = "Old keybind HUD (draggable panel)", Default = false, Flag = "hud", NoList = true })
+	misc:AddKeybind({ Text = "Old HUD show/hide key", Default = Enum.KeyCode.J, Flag = "hudKey", Pressed = function()
+		local entry = ui.Flags.hud
+		if entry then entry.Set(not entry.Value) end
+	end })
+
+	-- Saving and loading configs is built into V18UI's Settings tab (HussValley/configs/<name>.json).
 	local settingsTab = window.Settings or misc
-	settingsTab:AddSection("Configs")
-	settingsTab:AddDropdown({ Text = "Config slot", Options = { "Config 1", "Config 2", "Config 3", "Config 4", "Config 5" }, Default = "Config 1", Flag = "cfg_slot" })
-	settingsTab:AddButton({ Text = "Save config", Callback = function() saveConfig(ui.Flags.cfg_slot.Value) end })
-	settingsTab:AddButton({ Text = "Load config", Callback = function() loadConfig(ui.Flags.cfg_slot.Value) end })
-	settingsTab:AddButton({ Text = "Delete config", Callback = function() deleteConfig(ui.Flags.cfg_slot.Value) end })
+	settingsTab:AddSection("Start-up")
 	settingsTab:AddToggle({
-		Text = "Load this config when the script starts",
+		Text = "Load the selected config when the script starts",
 		Default = false,
 		Flag = "cfg_autoload",
+		NoList = true,
+		Bind = false,
 		Callback = function(on)
 			pcall(function()
 				if not isfolder("HussValley") then makefolder("HussValley") end
-				if on then
-					writefile(AUTOLOAD_FILE, ui.Flags.cfg_slot.Value)
+				local pick = ui.Flags.cfg_pick and ui.Flags.cfg_pick.Value
+				if on and pick and pick ~= "(none)" then
+					writefile(AUTOLOAD_FILE, pick)
 				elseif isfile(AUTOLOAD_FILE) then
 					delfile(AUTOLOAD_FILE)
 				end
 			end)
 		end,
 	})
-	settingsTab:AddLabel("Saves every switch, slider, dropdown and keybind to a file in your executor workspace (HussValley/configs). Pick a slot, then save or load it.")
 
-	window:Notify({ Title = "Huss Valley", Text = "RightShift toggles the menu", Duration = 4 })
+	-- Live widgets beside the window.
+	window:AddWidget({ Title = "Server", Icon = "gauge", Kind = "stat", Get = function()
+		local status = STATUS[servers.localKey]
+		return status.label, servers.localKey == "unknown" and 0.04 or 1, servers.localText
+	end })
+
+	createServerGui()
+	window:Notify({ Title = "Huss Valley", Text = "Loaded. RightShift toggles the menu, K opens the server browser.", Duration = 5 })
 end
 
 function HussValley.init()
@@ -1360,6 +2151,22 @@ function HussValley.init()
 	participantDirectory = loadModule(replicatedStorage.ChickenOrHero:WaitForChild("Presentation"):WaitForChild("ParticipantDirectory"))
 
 	guiParent = resolveGuiParent()
+
+	-- The game answers server-list requests on this remote (only for players in the lobby); keep the latest reply.
+	local browserRemote = replicatedStorage.ChickenOrHero:WaitForChild("Presentation"):FindFirstChild("ServerBrowserEvent")
+	if browserRemote then
+		servers.remote = browserRemote
+		table.insert(connections, browserRemote.OnClientEvent:Connect(function(kind, data)
+			if kind ~= "List" or type(data) ~= "table" or type(data.rows) ~= "table" then return end
+
+			-- Plain table writes only: this callback runs at a low thread identity.
+			local rows = {}
+			for _, raw in data.rows do
+				if type(raw) == "table" and (raw.current or (raw.updatedAt and os.time() - raw.updatedAt <= 60)) then table.insert(rows, gameRow(raw)) end
+			end
+			servers.gameRows, servers.gameAt = rows, os.clock()
+		end))
+	end
 	buildUi()
 	setupAntiAfk()
 	installMovement()
@@ -1404,10 +2211,10 @@ function HussValley.init()
 		local success, slot = pcall(function()
 			if isfile(AUTOLOAD_FILE) then return readfile(AUTOLOAD_FILE) end
 		end)
-		if not (success and type(slot) == "string" and ui and ui.Flags.cfg_slot) then return end
+		if not (success and type(slot) == "string" and slot ~= "" and ui and ui.Flags.cfg_pick) then return end
 
 		setthreadidentity(8)
-		pcall(ui.Flags.cfg_slot.Set, slot)
+		pcall(ui.Flags.cfg_pick.Set, slot)
 		loadConfig(slot, true)
 		pcall(ui.Flags.cfg_autoload.Set, true)
 	end)
@@ -1436,6 +2243,9 @@ function HussValley.detach()
 		highlights[character] = nil
 	end
 
+	if hudGui then pcall(function() hudGui:Destroy() end) end
+	if serverGui then pcall(function() serverGui:Destroy() end) end
+	hudGui, hudLabel, keybindLabel = nil, nil, nil
 	if ui then pcall(function() ui:Destroy() end) end
 	if shared.HussValley == HussValley then shared.HussValley = nil end
 end
