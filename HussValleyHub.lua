@@ -1033,6 +1033,7 @@ end
 -- The character is held at that depth every frame (it would otherwise fall), then put back on the exact surface spot.
 
 local underground = nil
+local undergroundEndedAt = -10
 
 ---@param position Vector3
 ---@param threats table
@@ -1045,6 +1046,8 @@ local function surfaceThreatened(position, threats)
 	return false
 end
 
+-- Drops the character straight down in a single frame. The exact CFrame it stood at is remembered, so coming back is
+-- an exact return (never a nudge up or sideways), and it can be repeated without drifting.
 ---@param context table
 ---@param manual boolean
 local function goUnderground(context, manual)
@@ -1053,35 +1056,59 @@ local function goUnderground(context, manual)
 	local root = context.root
 	local depth = numberFlag("undergroundDepth", 20)
 	local surface = root.CFrame
-	underground = { surface = surface, hold = surface - Vector3.new(0, depth, 0), since = os.clock(), calmSince = nil, manual = manual }
-	context.character:PivotTo(underground.hold)
+
+	-- How fast to move while down there, from the game's own runner top speed.
+	local profile = originalGet and originalGet("Runner", localPlayer)
+	setthreadidentity(8)
+	local speed = type(profile) == "table" and type(profile.MaxSpeed) == "number" and profile.MaxSpeed or 30
+
+	underground = { surface = surface, holdY = surface.Position.Y - depth, since = os.clock(), calmSince = nil, manual = manual, speed = speed }
+	context.character:PivotTo(surface - Vector3.new(0, depth, 0))
 	root.AssemblyLinearVelocity = Vector3.zero
 	log("underground", depth)
 end
 
+-- Back to the surface in one frame: either the exact spot we went down from, or straight above where we are now.
 ---@param context table?
 local function comeBackUp(context)
 	local state = underground
 	underground = nil
+	undergroundEndedAt = os.clock()
 	if not state then return end
 
 	local character = context and context.character or localPlayer.Character
-	if character and character.Parent then
-		character:PivotTo(state.surface + Vector3.new(0, 0.5, 0))
-		local root = character:FindFirstChild("HumanoidRootPart")
-		if root then root.AssemblyLinearVelocity = Vector3.zero end
+	local root = character and character.Parent and character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+
+	local target = state.surface
+	local entry = ui and ui.Flags.undergroundReturn
+	if entry and entry.Value == "Straight above me" then
+		target = CFrame.new(root.Position.X, state.surface.Position.Y, root.Position.Z) * state.surface.Rotation
 	end
+
+	character:PivotTo(target)
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
 	log("back up")
 end
 
--- Every frame while underground: hold the spot, and come back once nothing can hit the surface spot any more.
+-- Every frame while underground: keep the depth, move with the movement keys (the game's own movement does not work
+-- below the floor, so the move is applied here), and come back once nothing can hit the surface spot any more.
 ---@param context table
-local function manageUnderground(context)
+---@param deltaTime number
+local function manageUnderground(context, deltaTime)
 	local state = underground
 	if not state then return end
 
 	local root = context.root
-	root.CFrame = state.hold
+	local position = root.Position
+	local planar = Vector3.zero
+	if flag("undergroundMove") and context.humanoid then
+		local direction = context.humanoid.MoveDirection
+		planar = Vector3.new(direction.X, 0, direction.Z) * state.speed * deltaTime
+	end
+
+	root.CFrame = CFrame.new(position.X + planar.X, state.holdY, position.Z + planar.Z) * root.CFrame.Rotation
 	root.AssemblyLinearVelocity = Vector3.zero
 
 	local now = os.clock()
@@ -1094,7 +1121,7 @@ local function manageUnderground(context)
 		state.calmSince = state.calmSince or now
 	end
 
-	if (state.calmSince and now - state.calmSince >= numberFlag("undergroundStay", 0.4)) or now - state.since > 3 then comeBackUp(context) end
+	if (state.calmSince and now - state.calmSince >= numberFlag("undergroundStay", 0.12)) or now - state.since > 3 then comeBackUp(context) end
 end
 
 -- Key / button: go down by hand, press again to come back up.
@@ -1141,7 +1168,7 @@ local function react(context)
 	refreshTuning()
 
 	-- Underground dodge: instead of dashing (or only when the dash is not ready), drop below the floor until it is over.
-	if committed and flag("undergroundDodge") and (not flag("undergroundBackup") or not ready) then
+	if committed and flag("undergroundDodge") and os.clock() - undergroundEndedAt > 0.1 and (not flag("undergroundBackup") or not ready) then
 		goUnderground(context, false)
 		return
 	end
@@ -2350,7 +2377,7 @@ local function step(deltaTime)
 
 	local context = { character = character, humanoid = humanoid, root = root }
 	if underground then
-		manageUnderground(context)
+		manageUnderground(context, deltaTime)
 		return
 	end
 
@@ -2566,9 +2593,11 @@ local function buildUi()
 	combat:AddToggle({ Text = "Underground dodge: sink below the floor while an attack passes, then come back up", Default = false, Flag = "undergroundDodge" })
 	combat:AddToggle({ Text = "Only when the dash is not ready", Default = false, Flag = "undergroundBackup", NoList = true })
 	combat:AddSlider({ Text = "Depth (studs)", Min = 8, Max = 40, Default = 20, Increment = 1, Flag = "undergroundDepth" })
-	combat:AddSlider({ Text = "Stay down after the attack ends (s)", Min = 0.1, Max = 1.5, Default = 0.4, Increment = 0.05, Flag = "undergroundStay" })
+	combat:AddSlider({ Text = "Stay down after the attack ends (s): lower = a split second", Min = 0.03, Max = 1.5, Default = 0.12, Increment = 0.01, Flag = "undergroundStay" })
+	combat:AddToggle({ Text = "Move freely with the movement keys while underground", Default = true, Flag = "undergroundMove", NoList = true })
+	combat:AddDropdown({ Text = "Come back up at", Options = { "Where I went down", "Straight above me" }, Default = "Where I went down", Flag = "undergroundReturn" })
 	combat:AddKeybind({ Text = "Go underground / come back up by hand", Default = Enum.KeyCode.H, Flag = "undergroundKey", Pressed = toggleUnderground })
-	combat:AddLabel("Works with Auto Dodge or Immortal switched on. When an attack is about to reach you, you drop to the chosen depth (held there so you do not fall), then you are put back on the exact spot you left once nothing can hit it any more, or after 3 seconds at most. It is a vertical jump the server can see, so it may be moved back or flagged; untested against the server.")
+	combat:AddLabel("Works with Auto Dodge or Immortal switched on. When an attack is about to reach you, you drop to the chosen depth in one frame (held there so you do not fall, and you can still move), then you are put back, in one frame, on the exact spot you left once nothing can hit it any more, or after 3 seconds at most. Going back to the exact spot means other players see you stay put. It is a vertical jump the server can see, so it may be moved back or flagged; untested against the server.")
 	combat:AddSection("Immortal: dash tweaks")
 	combat:AddToggle({ Text = "Immortal: no dash cooldown", Default = true, Flag = "immortalNoCooldown", NoList = true, Callback = function(on) movement.immortalNoCooldown = on end })
 	combat:AddToggle({ Text = "Immortal: skip dash recovery (no wait after a dash)", Default = true, Flag = "immortalSkipRecovery", NoList = true, Callback = function(on) movement.immortalSkipRecovery = on end })
