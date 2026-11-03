@@ -230,10 +230,43 @@ local function tackleRemaining()
 end
 
 -- Keeps the position nudge applied to outgoing tackles in step with the Reach assist switch and slider.
+-- Installs the outgoing-tackle hook the first time it is needed. Until then the game's method calls are untouched.
+local function ensureTackleHook()
+	local hookData = tackleHook
+	if not hookData or hookData.installed then return end
+
+	hookData.installed = true
+	local originalNamecall
+	originalNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+		-- Cheap checks first: this runs for every method call the game makes.
+		if (hookData.reach > 0 or hookData.fullSpeed) and self == hookData.remote then
+			local method = getnamecallmethod()
+			if method == "FireServer" then
+				local kind, payload = ...
+				if kind == "Tackle" and type(payload) == "table" and typeof(payload.position) == "Vector3" and typeof(payload.direction) == "Vector3" then
+					local shifted = table.clone(payload)
+					if hookData.reach > 0 then shifted.position = payload.position + payload.direction * hookData.reach end
+					-- Full-length tackle: the game picks the tackle's reach and distance from the speed you enter it
+					-- at (0 = shortest). Report the catcher's top speed instead of the real one.
+					-- Only plain reads here: anything that makes its own method calls would clobber the namecall method.
+					if hookData.fullSpeed and type(payload.speed) == "number" and type(hookData.top) == "number" and hookData.top > payload.speed then
+						shifted.speed = hookData.top
+					end
+					setnamecallmethod(method)
+					return originalNamecall(self, kind, shifted)
+				end
+			end
+		end
+
+		return originalNamecall(self, ...)
+	end))
+end
+
 local function syncReach()
 	if tackleHook then
 		tackleHook.reach = tackle.reachAssist and tackle.reach or 0
 		tackleHook.fullSpeed = tackle.fullFromStandstill
+		if tackleHook.reach > 0 or tackleHook.fullSpeed then ensureTackleHook() end
 	end
 end
 local movementModel = nil
@@ -243,16 +276,22 @@ local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.RespectCanCollide = true
 
--- One MoveDirection hook per session, kept in getgenv so a re-execute never stacks a second one.
-local hookState = getgenv().HussValleyHook
+-- One MoveDirection hook per session, kept in getgenv so a re-execute never stacks a second one. A hook on game.__index
+-- runs for every property read in the game, so it is only installed the first time a dodge actually steers.
+local hookState = getgenv().HussValleyHook2
 if not hookState then
-	hookState = { steer = nil, expiresAt = 0, humanoid = nil }
-	getgenv().HussValleyHook = hookState
+	hookState = { steer = nil, expiresAt = 0, humanoid = nil, installed = false }
+	getgenv().HussValleyHook2 = hookState
+end
 
+local function ensureIndexHook()
+	if hookState.installed then return end
+
+	hookState.installed = true
 	-- The game's movement step reads Humanoid.MoveDirection to pick the dash direction, so we answer that read.
 	local oldIndex
 	oldIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
-		if key == "MoveDirection" and hookState.steer and self == hookState.humanoid and os.clock() < hookState.expiresAt and not checkcaller() then
+		if hookState.steer and key == "MoveDirection" and self == hookState.humanoid and os.clock() < hookState.expiresAt and not checkcaller() then
 			return hookState.steer
 		end
 
@@ -359,6 +398,50 @@ end
 ---@param role string
 ---@param player Instance
 ---@return table
+local function tuningBits(settings)
+	local bits = 0
+	if settings.noCooldown then bits += 1 end
+	if settings.noRecovery then bits += 2 end
+	if settings.longDash then bits += 4 end
+	if settings.fastDash then bits += 8 end
+	if settings.fullDash then bits += 16 end
+	if settings.instantAccel then bits += 32 end
+	if settings.catcherDash then bits += 64 end
+	if settings.speed then bits += 128 end
+	return bits
+end
+
+-- Reused every call so a frame's profile lookups allocate nothing.
+local catcherLayer = {}
+
+---@param profile table
+---@param settings table
+---@return table
+local function profileVariant(profile, settings)
+	local variants = profileCache[profile]
+	if not variants then
+		variants = {}
+		profileCache[profile] = variants
+	end
+
+	local bits = tuningBits(settings)
+	local bucket = variants[bits]
+	if not bucket then
+		bucket = {}
+		variants[bits] = bucket
+	end
+
+	for _, entry in bucket do
+		if entry.gap == settings.gap and entry.scale == settings.scale and entry.dashTime == settings.dashTime and entry.boost == settings.boost then
+			return entry.profile
+		end
+	end
+
+	local built = tuneProfile(profile, settings)
+	table.insert(bucket, { gap = settings.gap, scale = settings.scale, dashTime = settings.dashTime, boost = settings.boost, profile = built })
+	return built
+end
+
 local function retunedProfile(role, player)
 	local profile = originalGet(role, player)
 	if player ~= localPlayer or type(profile) ~= "table" then return profile end
@@ -368,7 +451,8 @@ local function retunedProfile(role, player)
 	-- Catcher-only switches are layered on a copy, so the runner profile never sees them.
 	local effective = tuning
 	if role == "Catcher" and (movement.catcherNoCooldown or movement.catcherSpeed) then
-		effective = table.clone(tuning)
+		for key, value in tuning do catcherLayer[key] = value end
+		effective = catcherLayer
 		if movement.catcherNoCooldown then
 			effective.noCooldown = true
 			effective.gap = 0
@@ -382,23 +466,7 @@ local function retunedProfile(role, player)
 
 	if not (effective.noCooldown or effective.noRecovery or effective.longDash or effective.fastDash or effective.fullDash or effective.instantAccel or effective.catcherDash or effective.speed) then return profile end
 
-	local success, result = pcall(function()
-		local signature = string.format("%s|%.2f|%s|%s|%.2f|%s|%.0f|%s|%s|%s|%s|%.1f", tostring(effective.noCooldown), effective.gap, tostring(effective.noRecovery), tostring(effective.longDash), effective.scale, tostring(effective.fastDash), effective.dashTime, tostring(effective.fullDash), tostring(effective.instantAccel), tostring(effective.catcherDash), tostring(effective.speed), effective.boost)
-		local variants = profileCache[profile]
-		if not variants then
-			variants = {}
-			profileCache[profile] = variants
-		end
-
-		local cached = variants[signature]
-		if not cached then
-			cached = tuneProfile(profile, effective)
-			variants[signature] = cached
-		end
-
-		return cached
-	end)
-
+	local success, result = pcall(profileVariant, profile, effective)
 	return success and result or profile
 end
 
@@ -598,15 +666,24 @@ local function catcherActive()
 end
 
 ---@return table
+local participantsCache = nil
+local participantsAt = -1
+
 local function participants()
+	-- Every caller wants the same list within a frame or two; asking the game for it each time is wasted work.
+	local now = os.clock()
+	if participantsCache and now - participantsAt < 0.1 then return participantsCache end
+
+	local list = nil
 	if participantDirectory then
-		local success, list = pcall(participantDirectory.list)
+		local success, result = pcall(participantDirectory.list)
 		-- Running game code leaves this thread with the game script's reduced capabilities.
 		setthreadidentity(8)
-		if success and type(list) == "table" then return list end
+		if success and type(result) == "table" then list = result end
 	end
 
-	return playersService:GetPlayers()
+	participantsCache, participantsAt = list or playersService:GetPlayers(), now
+	return participantsCache
 end
 
 ---@param participant any
@@ -777,6 +854,7 @@ end
 ---@param direction Vector3
 ---@param duration number
 local function steer(direction, duration)
+	ensureIndexHook()
 	hookState.steer = direction
 	hookState.expiresAt = os.clock() + duration
 end
@@ -1358,6 +1436,9 @@ local serverNotice = nil
 local serverCount = nil
 local serverThis = nil
 local serverChips = {}
+local serverPool = {}
+local serverEmpty = nil
+local lastServerRender = -10
 
 -- Maps the game's own phase text (or anything similar) to one of the status buckets above.
 ---@param phase any
@@ -1629,6 +1710,75 @@ local function sortedRows()
 	return shown
 end
 
+local function buildServerRow(index)
+	local frame = make("Frame", { Size = UDim2.new(1, -6, 0, 70), BackgroundColor3 = PANEL_COLORS.row, BackgroundTransparency = 0.93, BorderSizePixel = 0, LayoutOrder = index }, serverList)
+	make("UICorner", { CornerRadius = UDim.new(0, 10) }, frame)
+	local accent = make("Frame", { Size = UDim2.new(0, 4, 1, -16), Position = UDim2.fromOffset(8, 8), BackgroundColor3 = PANEL_COLORS.muted, BorderSizePixel = 0 }, frame)
+	make("UICorner", { CornerRadius = UDim.new(0, 2) }, accent)
+
+	local entry = { frame = frame, accent = accent, row = nil }
+	entry.title = makeLabel(frame, "", 13, PANEL_COLORS.text, Enum.Font.GothamBold, { Position = UDim2.fromOffset(24, 8), Size = UDim2.new(1, -260, 0, 18) })
+	entry.detail = makeLabel(frame, "", 12, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Position = UDim2.fromOffset(24, 28), Size = UDim2.new(1, -260, 0, 16) })
+	entry.king = makeLabel(frame, "", 11, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Position = UDim2.fromOffset(24, 46), Size = UDim2.new(1, -260, 0, 14) })
+	local barBack = make("Frame", { Position = UDim2.new(1, -230, 0, 51), Size = UDim2.fromOffset(120, 6), BackgroundColor3 = PANEL_COLORS.row, BackgroundTransparency = 0.88, BorderSizePixel = 0 }, frame)
+	make("UICorner", { CornerRadius = UDim.new(1, 0) }, barBack)
+	entry.barFill = make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = PANEL_COLORS.accent2, BorderSizePixel = 0 }, barBack)
+	make("UICorner", { CornerRadius = UDim.new(1, 0) }, entry.barFill)
+	entry.players = makeLabel(frame, "", 12, PANEL_COLORS.text, Enum.Font.GothamMedium, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -96, 0, 8), Size = UDim2.fromOffset(130, 18), TextXAlignment = Enum.TextXAlignment.Right })
+	entry.ping = makeLabel(frame, "", 11, PANEL_COLORS.muted, Enum.Font.GothamMedium, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -96, 0, 28), Size = UDim2.fromOffset(130, 16), TextXAlignment = Enum.TextXAlignment.Right })
+	entry.join = make("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -10, 0.5, 0),
+		Size = UDim2.fromOffset(70, 30),
+		BackgroundColor3 = PANEL_COLORS.accent,
+		AutoButtonColor = false,
+		Text = "JOIN",
+		TextSize = 12,
+		Font = Enum.Font.GothamBold,
+		TextColor3 = PANEL_COLORS.text,
+		BorderSizePixel = 0,
+	}, frame)
+	make("UICorner", { CornerRadius = UDim.new(0, 8) }, entry.join)
+	entry.join.Activated:Connect(function()
+		if entry.row then joinServer(entry.row) end
+	end)
+
+	serverPool[index] = entry
+	return entry
+end
+
+---@param entry table
+---@param row table
+local function fillServerRow(entry, row)
+	local status = STATUS[row.status]
+	entry.row = row
+	entry.frame.Visible = true
+	entry.frame.BackgroundTransparency = row.current and 0.86 or 0.93
+	entry.accent.BackgroundColor3 = status.color
+	entry.title.Text = (row.current and "YOUR SERVER  ·  " or "") .. row.region
+	entry.detail.Text = (row.phase ~= "" and row.phase ~= status.label) and (status.label .. "  ·  " .. row.phase) or status.label
+	entry.detail.TextColor3 = status.color
+
+	-- Fallen King progress: the game's cauldron percentage (can pass 100%) with a bar.
+	local kingLine, kingFill = "Fallen King: not shared by the list", 0
+	if row.king and row.king.progress then
+		kingLine = servers.kingText(row.king)
+		kingFill = math.clamp(row.king.progress, 0, 1)
+	elseif row.king and row.king.state then
+		kingLine = "Fallen King  ·  " .. tostring(row.king.state)
+	end
+	entry.king.Text = kingLine
+	entry.barFill.Size = UDim2.fromScale(kingFill, 1)
+	entry.barFill.BackgroundColor3 = kingFill >= 1 and Color3.fromRGB(240, 96, 112) or PANEL_COLORS.accent2
+
+	entry.players.Text = string.format("%d / %d players", row.players, row.capacity)
+	entry.ping.Text = row.ping and string.format("%d ms", row.ping) or "ping n/a"
+
+	local blocked = row.current or row.full
+	entry.join.BackgroundTransparency = blocked and 0.7 or 0.05
+	entry.join.Text = row.current and "HERE" or (row.full and "FULL" or "JOIN")
+end
+
 local function renderServers()
 	if not serverGui then return end
 
@@ -1666,63 +1816,23 @@ local function renderServers()
 		if key ~= "all" and key ~= "hideFull" and counts[key] then chip.Text = string.format("%s  %d", STATUS[key].label, counts[key]) end
 	end
 
-	for _, child in serverList:GetChildren() do
-		if child:IsA("GuiObject") then child:Destroy() end
-	end
-
 	local shown = sortedRows()
-	serverCount.Text = string.format("%d of %d servers", math.min(#shown, SERVER_ROWS_SHOWN), #servers.rows)
+	local visible = math.min(#shown, SERVER_ROWS_SHOWN)
+	serverCount.Text = string.format("%d of %d servers", visible, #servers.rows)
 
-	for index = 1, math.min(#shown, SERVER_ROWS_SHOWN) do
-		local row = shown[index]
-		local status = STATUS[row.status]
-		local frame = make("Frame", { Size = UDim2.new(1, -6, 0, 70), BackgroundColor3 = PANEL_COLORS.row, BackgroundTransparency = row.current and 0.86 or 0.93, BorderSizePixel = 0, LayoutOrder = index }, serverList)
-		make("UICorner", { CornerRadius = UDim.new(0, 10) }, frame)
-		local accent = make("Frame", { Size = UDim2.new(0, 4, 1, -16), Position = UDim2.fromOffset(8, 8), BackgroundColor3 = status.color, BorderSizePixel = 0 }, frame)
-		make("UICorner", { CornerRadius = UDim.new(0, 2) }, accent)
-
-		makeLabel(frame, (row.current and "YOUR SERVER  ·  " or "") .. row.region, 13, PANEL_COLORS.text, Enum.Font.GothamBold, { Position = UDim2.fromOffset(24, 8), Size = UDim2.new(1, -260, 0, 18) })
-		local detail = (row.phase ~= "" and row.phase ~= status.label) and (status.label .. "  ·  " .. row.phase) or status.label
-		makeLabel(frame, detail, 12, status.color, Enum.Font.GothamMedium, { Position = UDim2.fromOffset(24, 28), Size = UDim2.new(1, -260, 0, 16) })
-
-		-- Fallen King progress: the game's cauldron percentage (can pass 100%) with a bar.
-		local kingLine, kingFill = "Fallen King: not shared by the list", 0
-		if row.king and row.king.progress then
-			kingLine = servers.kingText(row.king)
-			kingFill = math.clamp(row.king.progress, 0, 1)
-		elseif row.king and row.king.state then
-			kingLine = "Fallen King  ·  " .. tostring(row.king.state)
-		end
-		makeLabel(frame, kingLine, 11, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Position = UDim2.fromOffset(24, 46), Size = UDim2.new(1, -260, 0, 14) })
-		local barBack = make("Frame", { Position = UDim2.new(1, -230, 0, 51), Size = UDim2.fromOffset(120, 6), BackgroundColor3 = PANEL_COLORS.row, BackgroundTransparency = 0.88, BorderSizePixel = 0 }, frame)
-		make("UICorner", { CornerRadius = UDim.new(1, 0) }, barBack)
-		local barFill = make("Frame", { Size = UDim2.fromScale(kingFill, 1), BackgroundColor3 = kingFill >= 1 and Color3.fromRGB(240, 96, 112) or PANEL_COLORS.accent2, BorderSizePixel = 0 }, barBack)
-		make("UICorner", { CornerRadius = UDim.new(1, 0) }, barFill)
-		makeLabel(frame, string.format("%d / %d players", row.players, row.capacity), 12, PANEL_COLORS.text, Enum.Font.GothamMedium, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -96, 0, 8), Size = UDim2.fromOffset(130, 18), TextXAlignment = Enum.TextXAlignment.Right })
-		makeLabel(frame, row.ping and string.format("%d ms", row.ping) or "ping n/a", 11, PANEL_COLORS.muted, Enum.Font.GothamMedium, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -96, 0, 28), Size = UDim2.fromOffset(130, 16), TextXAlignment = Enum.TextXAlignment.Right })
-
-		local blocked = row.current or row.full
-		local join = make("TextButton", {
-			AnchorPoint = Vector2.new(1, 0.5),
-			Position = UDim2.new(1, -10, 0.5, 0),
-			Size = UDim2.fromOffset(70, 30),
-			BackgroundColor3 = PANEL_COLORS.accent,
-			BackgroundTransparency = blocked and 0.7 or 0.05,
-			AutoButtonColor = false,
-			Text = row.current and "HERE" or (row.full and "FULL" or "JOIN"),
-			TextSize = 12,
-			Font = Enum.Font.GothamBold,
-			TextColor3 = PANEL_COLORS.text,
-			BorderSizePixel = 0,
-		}, frame)
-		make("UICorner", { CornerRadius = UDim.new(0, 8) }, join)
-		join.Activated:Connect(function() joinServer(row) end)
+	-- Rows are built once and reused; only their text and colors change. Rebuilding them cost tens of milliseconds.
+	for index = 1, visible do
+		local entry = serverPool[index] or buildServerRow(index)
+		fillServerRow(entry, shown[index])
 	end
+	for index = visible + 1, #serverPool do serverPool[index].frame.Visible = false end
 
-	if #shown == 0 then
-		local empty = makeLabel(serverList, #servers.rows == 0 and "No servers loaded yet." or "No server matches this filter.", 13, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Size = UDim2.new(1, 0, 0, 40), TextXAlignment = Enum.TextXAlignment.Center })
-		empty.LayoutOrder = 1
+	if not serverEmpty then
+		serverEmpty = makeLabel(serverList, "", 13, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Size = UDim2.new(1, 0, 0, 40), TextXAlignment = Enum.TextXAlignment.Center })
+		serverEmpty.LayoutOrder = 0
 	end
+	serverEmpty.Visible = visible == 0
+	serverEmpty.Text = #servers.rows == 0 and "No servers loaded yet." or "No server matches this filter."
 end
 
 local function createServerGui()
@@ -1819,8 +1929,10 @@ local function serversTick()
 		end
 	end
 
-	if servers.dirty and serverGui then
+	-- Closed panel: nothing to draw (opening it marks the data dirty). Open: redraw at most ~3 times a second.
+	if servers.dirty and serverGui and serverGui.Enabled and os.clock() - lastServerRender >= 0.3 then
 		servers.dirty = false
+		lastServerRender = os.clock()
 		renderServers()
 	end
 end
@@ -1834,7 +1946,7 @@ local function refreshHud()
 	pcall(function()
 		if not ui then return end
 
-		if not hudGui then createHud() end
+		if not hudGui and flag("hud") then createHud() end
 		if hudGui then hudGui.Enabled = flag("hud") end
 		if hudLabel and hudGui and hudGui.Enabled then
 			local text = registryText(true)
@@ -2193,35 +2305,13 @@ function HussValley.init()
 	end
 
 	-- Reach assist: shift the start position sent with a tackle forward a little (the server accepts a few studs of
-	-- position error). One hook per session, kept in getgenv so a re-execute never stacks a second one; it does nothing
-	-- while the reach is 0.
+	-- position error). The hook is only installed once Reach assist or Full-length tackle is first switched on (a
+	-- __namecall hook taxes every method call in the game), and kept in getgenv so a re-execute never stacks a second.
 	local gameAction = replicatedStorage.ChickenOrHero:WaitForChild("Game"):WaitForChild("GameAction")
 	tackleHook = getgenv().HussValleyTackleHook2
 	if not tackleHook then
-		tackleHook = { remote = gameAction, reach = 0, fullSpeed = false, topSpeed = nil }
+		tackleHook = { remote = gameAction, reach = 0, fullSpeed = false, top = nil, installed = false }
 		getgenv().HussValleyTackleHook2 = tackleHook
-		local hookData = tackleHook
-		local originalNamecall
-		originalNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-			local method = getnamecallmethod()
-			if (hookData.reach > 0 or hookData.fullSpeed) and self == hookData.remote and method == "FireServer" then
-				local kind, payload = ...
-				if kind == "Tackle" and type(payload) == "table" and typeof(payload.position) == "Vector3" and typeof(payload.direction) == "Vector3" then
-					local shifted = table.clone(payload)
-					if hookData.reach > 0 then shifted.position = payload.position + payload.direction * hookData.reach end
-					-- Full-length tackle: the game picks the tackle's reach and distance from the speed you enter it
-					-- at (0 = shortest). Report the catcher's top speed instead of the real one.
-					-- Only plain reads here: anything that makes its own method calls would clobber the namecall method.
-					if hookData.fullSpeed and type(payload.speed) == "number" and type(hookData.top) == "number" and hookData.top > payload.speed then
-						shifted.speed = hookData.top
-					end
-					setnamecallmethod(method)
-					return originalNamecall(self, kind, shifted)
-				end
-			end
-
-			return originalNamecall(self, ...)
-		end))
 	end
 	tackleHook.remote = gameAction
 	syncReach()
@@ -2334,6 +2424,16 @@ end
 HussValley.config = CONFIG
 HussValley.movement = movement
 HussValley.tackle = tackle
+-- Benchmark hooks for testing (not used by the hub itself).
+HussValley.debug = {
+	scanThreats = function(position) return scanThreats(position) end,
+	participants = function() return participants() end,
+	profileGet = function(role) return movementProfiles and movementProfiles.get(role or "Runner", localPlayer) end,
+	step = function(deltaTime) return step(deltaTime) end,
+	updateEsp = function() return updateEsp() end,
+	servers = servers,
+	renderServers = function() return renderServers() end,
+}
 
 shared.HussValley = HussValley
 xpcall(HussValley.init, onError)
