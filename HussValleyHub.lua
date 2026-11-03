@@ -1034,6 +1034,27 @@ end
 
 local underground = nil
 local undergroundEndedAt = -10
+-- Parts of the character that were solid before no-clip switched their collision off.
+local undergroundParts = {}
+
+-- No-clip: nothing of the character collides with walls or the ground while it is below the floor. New parts (a tool
+-- picked up, an accessory) are caught on every call.
+---@param character Model
+local function noclipCharacter(character)
+	for _, part in character:GetDescendants() do
+		if part:IsA("BasePart") and part.CanCollide then
+			part.CanCollide = false
+			undergroundParts[part] = true
+		end
+	end
+end
+
+local function restoreCollisions()
+	for part in undergroundParts do
+		if part.Parent then part.CanCollide = true end
+		undergroundParts[part] = nil
+	end
+end
 
 ---@param position Vector3
 ---@param threats table
@@ -1063,6 +1084,7 @@ local function goUnderground(context, manual)
 	local speed = type(profile) == "table" and type(profile.MaxSpeed) == "number" and profile.MaxSpeed or 30
 
 	underground = { surface = surface, holdY = surface.Position.Y - depth, since = os.clock(), calmSince = nil, manual = manual, speed = speed }
+	if flag("undergroundNoclip") then noclipCharacter(context.character) end
 	context.character:PivotTo(surface - Vector3.new(0, depth, 0))
 	root.AssemblyLinearVelocity = Vector3.zero
 	log("underground", depth)
@@ -1078,7 +1100,10 @@ local function comeBackUp(context)
 
 	local character = context and context.character or localPlayer.Character
 	local root = character and character.Parent and character:FindFirstChild("HumanoidRootPart")
-	if not root then return end
+	if not root then
+		restoreCollisions()
+		return
+	end
 
 	local target = state.surface
 	local entry = ui and ui.Flags.undergroundReturn
@@ -1089,6 +1114,7 @@ local function comeBackUp(context)
 	character:PivotTo(target)
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
+	restoreCollisions()
 	log("back up")
 end
 
@@ -1108,6 +1134,7 @@ local function manageUnderground(context, deltaTime)
 		planar = Vector3.new(direction.X, 0, direction.Z) * state.speed * deltaTime
 	end
 
+	if flag("undergroundNoclip") then noclipCharacter(context.character) end
 	root.CFrame = CFrame.new(position.X + planar.X, state.holdY, position.Z + planar.Z) * root.CFrame.Rotation
 	root.AssemblyLinearVelocity = Vector3.zero
 
@@ -2363,6 +2390,7 @@ local function step(deltaTime)
 	if not (humanoid and root) or humanoid.Health <= 0 then
 		clearSteer()
 		underground = nil
+		table.clear(undergroundParts)
 		return
 	end
 
@@ -2595,6 +2623,7 @@ local function buildUi()
 	combat:AddSlider({ Text = "Depth (studs)", Min = 8, Max = 40, Default = 20, Increment = 1, Flag = "undergroundDepth" })
 	combat:AddSlider({ Text = "Stay down after the attack ends (s): lower = a split second", Min = 0.03, Max = 1.5, Default = 0.12, Increment = 0.01, Flag = "undergroundStay" })
 	combat:AddToggle({ Text = "Move freely with the movement keys while underground", Default = true, Flag = "undergroundMove", NoList = true })
+	combat:AddToggle({ Text = "No-clip while underground: walls and ground do not block or push you", Default = true, Flag = "undergroundNoclip", NoList = true })
 	combat:AddDropdown({ Text = "Come back up at", Options = { "Where I went down", "Straight above me" }, Default = "Where I went down", Flag = "undergroundReturn" })
 	combat:AddKeybind({ Text = "Go underground / come back up by hand", Default = Enum.KeyCode.H, Flag = "undergroundKey", Pressed = toggleUnderground })
 	combat:AddLabel("Works with Auto Dodge or Immortal switched on. When an attack is about to reach you, you drop to the chosen depth in one frame (held there so you do not fall, and you can still move), then you are put back, in one frame, on the exact spot you left once nothing can hit it any more, or after 3 seconds at most. Going back to the exact spot means other players see you stay put. It is a vertical jump the server can see, so it may be moved back or flagged; untested against the server.")
@@ -2869,6 +2898,7 @@ function HussValley.init()
 	table.insert(connections, localPlayer.CharacterAdded:Connect(function()
 		lastRunStateAt = os.clock()
 		underground = nil
+		table.clear(undergroundParts)
 		clearSteer()
 	end))
 end
