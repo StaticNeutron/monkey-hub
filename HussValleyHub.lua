@@ -1514,6 +1514,8 @@ local function updateLocalStatus()
 	-- The server's own number for the catcher's top speed (the unmodified profile), cached for the tackle hook.
 	if tackleHook and originalGet then
 		local catcherProfile = originalGet("Catcher", localPlayer)
+		-- Running game code leaves this thread with the game script's reduced capabilities.
+		setthreadidentity(8)
 		if type(catcherProfile) == "table" and type(catcherProfile.MaxSpeed) == "number" then tackleHook.top = catcherProfile.MaxSpeed end
 	end
 
@@ -2081,6 +2083,71 @@ local function roleCard()
 	return tostring(role or "?"), alpha, tostring(runState or "")
 end
 
+-- Teleport ------------------------------------------------------------------------------------------------------------
+-- The field has two invisible safe-zone boxes (SafezoneASide / SafezoneBSide, one at each end of the crossing). The
+-- teleport puts the character inside the one on the far side of where it stands.
+
+local lastTeleportAt = -10
+
+---@param message string
+local function teleportNotify(message)
+	if uiWindow then uiWindow:Notify({ Title = "Teleport", Text = message, Duration = 4 }) end
+end
+
+-- The safe-zone box on the far side of the field from the given position, or nil when the map has none.
+---@param position Vector3
+---@return BasePart?
+local function farSafeZone(position)
+	local chicken = replicatedStorage:FindFirstChild("ChickenOrHero")
+	local gameFolder = chicken and chicken:FindFirstChild("Game")
+	local session = gameFolder and gameFolder:FindFirstChild("Session")
+	local mapId = session and session:GetAttribute("ActiveMapId")
+	local map = mapId and workspace:FindFirstChild(mapId)
+	local field = map and map:FindFirstChild("Field")
+	local sideA = field and field:FindFirstChild("SafezoneASide")
+	local sideB = field and field:FindFirstChild("SafezoneBSide")
+	if not (sideA and sideB and sideA:IsA("BasePart") and sideB:IsA("BasePart")) then return nil end
+
+	local toA = flat(position - sideA.Position).Magnitude
+	local toB = flat(position - sideB.Position).Magnitude
+	return toA > toB and sideA or sideB
+end
+
+-- Moves the character into the safe zone on the other side of the field.
+local function teleportAcross()
+	if os.clock() - lastTeleportAt < 1 then return end
+
+	local character = localPlayer.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not (root and humanoid) or humanoid.Health <= 0 then return teleportNotify("No character to move") end
+
+	if flag("teleportRoundOnly") and not runnerActive() then
+		return teleportNotify("Only works as a runner during a round (turn off the round-only switch to override)")
+	end
+
+	local zone = farSafeZone(root.Position)
+	if not zone then return teleportNotify("No safe zone found on this map") end
+
+	-- Land inside the box at floor level, keeping the current spot along the field's width.
+	local halfWidth = zone.Size.X / 2 - 4
+	local x = math.clamp(root.Position.X, zone.Position.X - halfWidth, zone.Position.X + halfWidth)
+	local landing = Vector3.new(x, zone.Position.Y - zone.Size.Y / 2 + 3.5, zone.Position.Z)
+
+	lastTeleportAt = os.clock()
+	character:PivotTo(CFrame.new(landing) * (root.CFrame - root.CFrame.Position))
+	root.AssemblyLinearVelocity = Vector3.zero
+	log("teleport to", landing)
+
+	-- The server decides where we really are: if it moved us back, say so instead of pretending it worked.
+	task.delay(1.2, function()
+		local current = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+		if current and flat(current.Position - landing).Magnitude > 25 then
+			teleportNotify("The server moved you back, the teleport was rejected")
+		end
+	end)
+end
+
 local function buildUi()
 	ui = loadLibrary()
 	local window = ui:CreateWindow({
@@ -2203,6 +2270,14 @@ local function buildUi()
 	catch:AddToggle({ Text = "Reach assist (hitbox expander, experimental)", Default = false, Flag = "reachAssist", Callback = function(on) tackle.reachAssist = on syncReach() end })
 	catch:AddSlider({ Text = "Extra reach (studs)", Min = 0.5, Max = 2, Default = 1.5, Increment = 0.5, Flag = "tackleReach", Callback = function(value) tackle.reach = value syncReach() end })
 	catch:AddLabel("Catches are decided by the server, so a hitbox cannot be resized from here. This instead starts each tackle a little further forward than you are (the server tolerates about 2.5 studs of position error), which lengthens your effective reach by that much. Untested against the server's hit rules; it switches itself off on a snap-back or a fair-play warning.")
+
+	-- Teleport ----------------------------------------------------------------------------------------------------
+	local teleportTab = window:CreateTab("Teleport", "rocket", "Jump to the other side")
+	teleportTab:AddSection("Cross the field")
+	teleportTab:AddKeybind({ Text = "Teleport to the other side key", Default = Enum.KeyCode.T, Flag = "teleportKey", Pressed = teleportAcross })
+	teleportTab:AddButton({ Text = "Teleport to the other side now", Callback = teleportAcross })
+	teleportTab:AddToggle({ Text = "Only while running a round as a runner", Default = true, Flag = "teleportRoundOnly", NoList = true })
+	teleportTab:AddLabel("Puts you inside the safe zone at the far end of the field the moment you press the key. The server checks positions, so a jump this long can be moved back or flagged by its fair-play system (which can alert staff). If it moves you back you will get a message. Use it at your own risk, ideally on an alt.")
 
 	-- Servers -----------------------------------------------------------------------------------------------------
 	window:CreateCategory("Servers")
