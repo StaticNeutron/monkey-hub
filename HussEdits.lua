@@ -627,14 +627,72 @@ function Edits.prelude(opts)
 	stage.BackgroundTransparency = 1
 	stage.Parent = canvas
 
-	-- Hairline that draws out from the centre before the wordmark.
-	local rule = Instance.new("Frame")
-	rule.AnchorPoint = Vector2.new(0.5, 0.5)
-	rule.Position = UDim2.fromScale(0.5, 0.5)
-	rule.Size = UDim2.fromOffset(0, 1)
-	rule.BackgroundColor3 = IVORY
-	rule.BorderSizePixel = 0
-	rule.Parent = stage
+	-- The reference's opening: three tilted rings of line segments turning around a point of light, drifting particles, and
+	-- eight rays. Everything collapses into the centre before the wordmark assembles.
+	local orbitHost = Instance.new("Frame")
+	orbitHost.AnchorPoint = Vector2.new(0.5, 0.5)
+	orbitHost.Position = UDim2.fromScale(0.5, 0.5)
+	orbitHost.Size = UDim2.fromOffset(300, 300)
+	orbitHost.BackgroundTransparency = 1
+	orbitHost.Parent = stage
+
+	local function orbitPart(parent, size)
+		local part = Instance.new("Frame")
+		part.AnchorPoint = Vector2.new(0.5, 0.5)
+		part.BackgroundColor3 = IVORY
+		part.BorderSizePixel = 0
+		part.Size = size or UDim2.fromOffset(2, 2)
+		part.BackgroundTransparency = 1
+		part.Parent = parent
+		return part
+	end
+
+	local orbitLines = {}
+	for ring = 1, 3 do
+		orbitLines[ring] = {}
+		for index = 1, 48 do
+			orbitLines[ring][index] = orbitPart(orbitHost, UDim2.fromOffset(2, 1))
+		end
+	end
+
+	local particles = {}
+	for index = 1, 52 do
+		local size = index % 3 == 0 and 2 or 1.3
+		local particle = orbitPart(stage, UDim2.fromOffset(size, size))
+		local rounding = Instance.new("UICorner")
+		rounding.CornerRadius = UDim.new(1, 0)
+		rounding.Parent = particle
+		particles[index] = particle
+	end
+
+	local core = orbitPart(orbitHost, UDim2.fromOffset(4, 4))
+	core.Position = UDim2.fromScale(0.5, 0.5)
+	local coreRounding = Instance.new("UICorner")
+	coreRounding.CornerRadius = UDim.new(1, 0)
+	coreRounding.Parent = core
+
+	local rays = {}
+	for index = 1, 8 do
+		local ray = orbitPart(orbitHost, UDim2.fromOffset(80, 1))
+		ray.Position = UDim2.fromScale(0.5, 0.5)
+		ray.Rotation = index * 22.5
+		local fade = Instance.new("UIGradient")
+		fade.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.1), NumberSequenceKeypoint.new(1, 1) })
+		fade.Parent = ray
+		rays[index] = ray
+	end
+
+	-- One point of a ring, tilted and turned in space, then squeezed in perspective.
+	local function projected(theta, ring, time, shrink)
+		local x, y = 132 * math.cos(theta), 132 * math.sin(theta)
+		local tilt = 0.75 + ring * 0.42
+		local z
+		y, z = y * math.cos(tilt), y * math.sin(tilt)
+		local rotation = time * 0.52 + ring * math.pi / 3
+		x, y = x * math.cos(rotation) - y * math.sin(rotation), x * math.sin(rotation) + y * math.cos(rotation)
+		local depth = 1 / (1 + z / 530)
+		return Vector2.new(150 + x * depth * shrink, 150 + y * depth * shrink)
+	end
 
 	-- The wordmark is cut into horizontal strips that slide in one after another.
 	local wordHeight, strips = 76, {}
@@ -759,13 +817,43 @@ function Edits.prelude(opts)
 
 		-- Wordmark assembly.
 		local drawn = ease(t / 0.7)
-		rule.Size = UDim2.fromOffset(300 * drawn * (1 - ease((t - 1.5) / 0.5)), 1)
+		local orbitAlpha = ease(t / 0.55) * (1 - ease((t - 2.65) / 0.9))
+		local shrink = 1 - ease((t - 2.7) / 1.0) * 0.96
+		for ring, segments in orbitLines do
+			for index, segment in segments do
+				local first = projected((index - 1) / 48 * math.pi * 2, ring, t, shrink)
+				local second = projected(index / 48 * math.pi * 2, ring, t, shrink)
+				local delta = second - first
+				segment.Position = UDim2.fromOffset((first.X + second.X) / 2, (first.Y + second.Y) / 2)
+				segment.Size = UDim2.fromOffset(delta.Magnitude + 0.5, 1.15)
+				segment.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+				segment.BackgroundTransparency = 1 - orbitAlpha * 0.64
+			end
+		end
+
+		local morph = ease((t - 2.6) / 0.8)
+		local particleFade = ease(t / 0.65) * (1 - ease((t - 4) / 0.4))
+		for index, particle in particles do
+			local phase = index * 2.399963 + t * 0.65
+			local radius = 25 + math.sqrt(index / 52) * 69
+			local x, y = math.cos(phase) * radius, math.sin(phase) * radius * 0.66
+			local lineX = (index - 26.5) * 4.7
+			local lineY = math.sin(index * 0.28 - t * 4) * 12 * math.sin(math.clamp((t - 3) / 1.2, 0, 1) * math.pi)
+			particle.Position = UDim2.new(0.5, x + (lineX - x) * morph, 0.5, y + (lineY - y) * morph)
+			particle.BackgroundTransparency = 1 - particleFade * (0.36 + (index % 4) * 0.15)
+		end
+
+		local glow = math.max(0, (1 - ease((t - 2.7) / 0.7)) * (0.65 + 0.15 * math.sin(t * 2)))
+		core.BackgroundTransparency = 1 - glow
+		for _, ray in rays do
+			ray.BackgroundTransparency = 1 - glow * 0.26
+		end
 		for index, strip in strips do
-			local progress = ease((t - 0.9 - (index - 1) * 0.035) / 0.65)
+			local progress = ease((t - 3.3 - (index - 1) * 0.035) / 0.65)
 			strip.mask.Position = UDim2.fromOffset((index % 2 == 0 and 1 or -1) * (1 - progress) * 32, (index - 1) * wordHeight / 12)
 			strip.word.TextTransparency = 1 - progress
 		end
-		edition.TextTransparency = 1 - ease((t - 1.8) / 0.6)
+		edition.TextTransparency = 1 - ease((t - 4.7) / 0.6)
 
 		local scale = math.min(1, (viewport.X - 40) / 700)
 		stage.Size = UDim2.fromOffset(700 * scale, 400 * scale)
@@ -776,13 +864,19 @@ function Edits.prelude(opts)
 		wordScale.Scale = 1 - 0.45 * filmShown
 
 		if state.phase == "intro" then
-			if state.install == "pending" then
-				footer.Text = t < 2.4 and "PREPARING YOUR SETUP" or string.format("FETCHING EDIT  %d%%", math.floor(state.fraction * 100))
-				fill.Size = UDim2.fromScale(math.clamp(state.fraction, t / 3, 1), 1)
-			elseif state.install == "fail" and t >= 2.6 then
+			if t < 2.6 then
+				footer.Text = "PREPARING YOUR SETUP"
+			elseif state.install == "pending" then
+				footer.Text = string.format("FETCHING EDIT  %d%%", math.floor(state.fraction * 100))
+			else
+				footer.Text = "SHAPING YOUR SPACE"
+			end
+			fill.Size = UDim2.fromScale(math.clamp(math.max(state.fraction, t / 5), 0, 1), 1)
+
+			if state.install == "fail" and t >= 4.6 then
 				footer.Text = "EDIT UNAVAILABLE"
 				state.phase, state.outTime = "out", 0
-			elseif state.install == "ok" and t >= 2.6 then
+			elseif state.install == "ok" and t >= 4.8 then
 				state.phase = "film"
 				player:play()
 			end

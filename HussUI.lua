@@ -17,10 +17,16 @@ local GUI_NAME = "HussUI"
 local INTRO_NAME = "HussUI_Intro"
 local BLUR_NAME = "HussUI_Blur"
 local ICON_FOLDER = "V18UI/icons/"
-local WINDOW_WIDTH = 940
-local WINDOW_HEIGHT = 610
-local HEADER_HEIGHT = 86
-local SIDEBAR_WIDTH = 200
+local WINDOW_WIDTH = 880
+local WINDOW_HEIGHT = 556
+local HEADER_HEIGHT = 90
+local SIDEBAR_WIDTH = 204
+local TAB_HEIGHT = 44
+local PAGE_PADDING = 24
+local ROW_HEIGHT = 52
+local RADIUS = 6
+-- Width of a row inside a page (window less sidebar, padding and the scroll bar).
+local LIST_WIDTH = 626
 local WIDGET_WIDTH = 188
 local WIDGET_GAP = 14
 local SEGMENTS = 22
@@ -29,29 +35,32 @@ local BACK = Enum.EasingStyle.Back
 local OUT = Enum.EasingDirection.Out
 local IN = Enum.EasingDirection.In
 
--- Palette: warm near-black surfaces and one ivory, at several strengths. Text, accent and lines are all the same ivory.
+-- Palette (the reference's): warm near-black surfaces and one ivory at several strengths.
 local IVORY = Color3.fromRGB(236, 232, 222)
 local COLORS = {
 	bg = Color3.fromRGB(12, 12, 12),
-	sidebar = Color3.fromRGB(12, 12, 12),
 	card = Color3.fromRGB(22, 22, 21),
-	row = IVORY,
+	overlay = Color3.fromRGB(30, 30, 28),
+	hover = Color3.fromRGB(42, 42, 39),
 	track = Color3.fromRGB(8, 8, 8),
-	stroke = IVORY,
+	line = Color3.fromRGB(69, 68, 63),
+	lineStrong = Color3.fromRGB(107, 105, 97),
+	row = IVORY,
 	text = IVORY,
+	dim = Color3.fromRGB(182, 179, 170),
 	muted = Color3.fromRGB(152, 149, 139),
+	faint = Color3.fromRGB(106, 105, 99),
 	accent = IVORY,
 	accent2 = Color3.fromRGB(190, 186, 176),
-	dark = Color3.fromRGB(12, 12, 12),
-	good = Color3.fromRGB(160, 196, 160),
+	ink = Color3.fromRGB(12, 12, 12),
+	good = Color3.fromRGB(150, 196, 160),
+	warn = Color3.fromRGB(232, 200, 120),
 	bad = Color3.fromRGB(206, 118, 108),
 }
 
--- Width a row has inside a card, used to measure wrapped text before the layout exists.
-local ROW_WIDTH = 300
-
 local BODY = Enum.Font.Gotham
 local BOLD = Enum.Font.GothamMedium
+local STRONG = Enum.Font.GothamBold
 local DISPLAY = Enum.Font.Garamond
 local MONO = Enum.Font.Code
 
@@ -136,9 +145,9 @@ end
 ---@param transparency number
 ---@param thickness number?
 ---@return UIStroke
-local function stroke(inst, transparency, thickness)
+local function stroke(inst, transparency, thickness, color)
 	return create("UIStroke", {
-		Color = COLORS.stroke,
+		Color = color or COLORS.line,
 		Thickness = thickness or 1,
 		Transparency = transparency,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
@@ -243,6 +252,161 @@ local function sweepPrevious()
 	end
 end
 
+-- Letter-spaced small caps, the way the reference sets its labels.
+---@param content string
+---@return string
+local function spaced(content)
+	local result = string.gsub(string.upper(content), ".", function(character)
+		return character == " " and "  " or (character .. " ")
+	end)
+	return (string.gsub(result, "%s+$", ""))
+end
+
+-- Assets: interface sounds and animated line icons ------------------------------------------------------------------------
+-- One small pack (assets/ui.pack + ui.json in the repo) is downloaded once and unpacked into the workspace. Everything that
+-- uses an asset works without it; sounds and animated icons simply appear once the pack is on disk.
+
+local ASSET_BASE = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/assets/"
+local ASSET_FOLDER = "HussValley/assets"
+local ASSET_MARKER = ASSET_FOLDER .. "/hv_ready_r1"
+local assetIds = {}
+local assetsState = "idle"
+
+-- Animated icons: name -> frame count (120 fps, 14 x 14 cells of 72 px per page, 196 frames a page).
+local ICONS = { ["grid-3"] = 73, account = 97, gauge = 253, compass = 133, cog = 121, ["document-list"] = 157 }
+local TAB_ICONS = {
+	Overview = "grid-3", Combat = "account", Movement = "gauge", Catcher = "account", Teleport = "compass",
+	Servers = "document-list", Visuals = "grid-3", Edits = "document-list", Misc = "cog", Settings = "cog",
+}
+local ICON_RATE = 120
+local ICON_CELLS = 196
+local SFX_LEVEL = { hover = 0.2, click = 0.35, tab = 0.3, open = 0.35, close = 0.3, toggle_on = 0.4, toggle_off = 0.35, saved = 0.4 }
+
+-- Downloads and unpacks the asset pack on its own thread (a blocking request on the main thread would stutter the game).
+local function ensureAssets()
+	if assetsState ~= "idle" then return end
+	assetsState = "loading"
+
+	task.spawn(function()
+		pcall(setthreadidentity, 8)
+		local success = pcall(function()
+			if isfile(ASSET_MARKER) then return end
+
+			local index = httpService:JSONDecode(request({ Url = ASSET_BASE .. "ui.json?t=" .. os.time(), Method = "GET" }).Body)
+			local pack = request({ Url = ASSET_BASE .. "ui.pack", Method = "GET" })
+			assert(pack.Success and #pack.Body == index.total, "asset pack incomplete")
+
+			local built = ""
+			for part in string.gmatch(ASSET_FOLDER, "[^/]+") do
+				built = built == "" and part or (built .. "/" .. part)
+				if not isfolder(built) then makefolder(built) end
+			end
+
+			local cursor = 0
+			for _, file in index.files do
+				writefile(ASSET_FOLDER .. "/hv_" .. string.gsub(file.name, "/", "_"), string.sub(pack.Body, cursor + 1, cursor + file.size))
+				cursor += file.size
+			end
+			writefile(ASSET_MARKER, "1")
+		end)
+
+		local ready = success and pcall(isfile, ASSET_MARKER) and isfile(ASSET_MARKER)
+		assetsState = ready and "ready" or "failed"
+	end)
+end
+
+-- An asset as a content id, or nil while the pack is not on disk.
+---@param name string
+---@return string?
+local function assetId(name)
+	if assetsState ~= "ready" then return nil end
+	if assetIds[name] ~= nil then return assetIds[name] or nil end
+
+	local success, id = pcall(function()
+		return getcustomasset(ASSET_FOLDER .. "/hv_" .. string.gsub(name, "/", "_"))
+	end)
+	assetIds[name] = (success and type(id) == "string" and id ~= "") and id or false
+	return assetIds[name] or nil
+end
+
+-- A short interface sound (CC0 set from the reference). Quiet when sounds are off.
+---@param name string
+local function playSfx(name)
+	if not active or not active.sounds then return end
+
+	local enabled = HussUI.Flags.ui_sfx
+	if enabled and not enabled.Value then return end
+
+	local id = assetId("sounds/" .. name .. ".ogg")
+	if not id then return end
+
+	local level = HussUI.Flags.ui_sfxVolume and HussUI.Flags.ui_sfxVolume.Value or 55
+	local sound = active.sounds[name]
+	if not sound then
+		sound = create("Sound", { Name = "Sfx_" .. name, SoundId = id }, active.gui)
+		active.sounds[name] = sound
+	end
+
+	sound.Volume = (SFX_LEVEL[name] or 0.3) * level / 100 * 2
+	sound.TimePosition = 0
+	sound:Play()
+end
+
+-- One animated line icon. The still last frame shows at rest; play() runs it from the start.
+---@param parent Instance
+---@param name string
+---@param size number
+---@param position UDim2
+---@return table
+local function newIcon(parent, name, size, position)
+	local image = create("ImageLabel", { Size = UDim2.fromOffset(size, size), Position = position, AnchorPoint = Vector2.new(0, 0.5), BackgroundTransparency = 1, ImageColor3 = COLORS.muted, ImageRectSize = Vector2.new(72, 72), Visible = false, ZIndex = 2 }, parent)
+	local player = { image = image, name = name, count = ICONS[name], playing = false, clock = 0, shown = false }
+
+	-- Shows one frame (0-based). False while its page is not available yet.
+	function player:setFrame(frame)
+		frame = math.clamp(math.floor(frame), 0, self.count - 1)
+		local id = assetId(string.format("icons/%s-%02d.png", self.name, frame // ICON_CELLS + 1))
+		if not id then return false end
+
+		local cell = frame % ICON_CELLS
+		image.Image = id
+		image.ImageRectOffset = Vector2.new((cell % 14) * 72, (cell // 14) * 72)
+		image.Visible = true
+		return true
+	end
+
+	function player:play()
+		self.playing, self.clock = true, 0
+	end
+
+	table.insert(active.icons, player)
+	return player
+end
+
+-- Advances every playing icon, and reveals each one as soon as its page exists.
+---@param deltaTime number
+local function stepIcons(deltaTime)
+	if not active or assetsState ~= "ready" then return end
+
+	for _, player in active.icons do
+		if not player.shown then
+			-- Rest on the finished frame; the still glyph steps aside.
+			if player:setFrame(player.count - 1) then
+				player.shown = true
+				if player.owner then player.owner.glyph.Visible = false end
+			end
+		elseif player.playing then
+			player.clock += deltaTime
+			local frame = math.floor(player.clock * ICON_RATE)
+			if frame >= player.count - 1 then
+				player.playing = false
+				frame = player.count - 1
+			end
+			player:setFrame(frame)
+		end
+	end
+end
+
 ---@param tab table
 ---@param opts table
 ---@param kind string
@@ -267,35 +431,36 @@ local function squish(scale)
 	tween(scale, 0.2, { Scale = 1 }, QUINT)
 end
 
--- Rows -------------------------------------------------------------------------------------------------------
+-- Rows -------------------------------------------------------------------------------------------------------------------
+-- One column of full-width rows (the reference's layout): a tracked section label, then 52 px raised rows with a hairline
+-- edge. Long text wraps and the row grows to fit.
 
 local Tab = {}
 Tab.__index = Tab
 
--- The card rows are added to: the newest section, or a default card when none was started.
----@param tab table
----@return Frame
-local function currentCard(tab)
-	if not tab.card then tab:AddSection("") end
-	return tab.card
+-- Width of a row's text before the controls on its right, used to measure wrapped text before the layout exists.
+local ROW_TEXT = LIST_WIDTH - 24
+
+---@param content string
+---@param width number
+---@param size number?
+---@param font Enum.Font?
+---@return number
+local function measure(content, width, size, font)
+	return math.ceil(textService:GetTextSize(tostring(content), size or 13, font or BOLD, Vector2.new(width, 1000)).Y)
 end
 
--- A soft glass row inside the current card.
+-- A raised row inside the tab's list.
 ---@param tab table
 ---@param height number
 ---@param clickable boolean
 ---@return Instance, UIScale
-local function newRow(tab, height, clickable, rest, hover)
-	rest = rest or 0.95
-	hover = hover or 0.9
-	local card = currentCard(tab)
+local function newRow(tab, height, clickable)
 	tab.order = tab.order + 1
-	tab.heights[tab.column] = tab.heights[tab.column] + height + 6
 
 	local props = {
 		Size = UDim2.new(1, 0, 0, height),
-		BackgroundColor3 = COLORS.row,
-		BackgroundTransparency = rest,
+		BackgroundColor3 = COLORS.card,
 		BorderSizePixel = 0,
 		LayoutOrder = tab.order,
 	}
@@ -304,64 +469,47 @@ local function newRow(tab, height, clickable, rest, hover)
 		props.AutoButtonColor = false
 	end
 
-	local row = create(clickable and "TextButton" or "Frame", props, card)
-	corner(row, 4)
+	local row = create(clickable and "TextButton" or "Frame", props, tab.list)
+	corner(row, RADIUS)
+	stroke(row, 0.5, 1, COLORS.line)
 	local scale = create("UIScale", { Scale = 1 }, row)
 
 	track(row.MouseEnter:Connect(function()
-		tween(row, 0.2, { BackgroundTransparency = hover })
+		tween(row, 0.2, { BackgroundColor3 = COLORS.overlay })
 	end))
 	track(row.MouseLeave:Connect(function()
-		tween(row, 0.25, { BackgroundTransparency = rest })
+		tween(row, 0.25, { BackgroundColor3 = COLORS.card })
 	end))
 
 	return row, scale
 end
 
--- Starts a titled glass card in the shorter of the two columns; later rows land inside it.
+-- A tracked, tiny, upper-case label that starts a group of rows.
 ---@param content string
 function Tab:AddSection(content)
-	local column = self.heights[1] <= self.heights[2] and 1 or 2
-	self.column = column
 	self.order = self.order + 1
+	if content == "" then return end
 
-	local card = create("Frame", {
-		Size = UDim2.new(1, 0, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = COLORS.card,
-		BackgroundTransparency = 0,
-		BorderSizePixel = 0,
-		ClipsDescendants = true,
-		LayoutOrder = self.order,
-	}, self.columns[column])
-	corner(card, 6)
-	stroke(card, 0.9)
-	create("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14), PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 14) }, card)
-	create("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, card)
-
-	self.card = card
-	self.heights[column] = self.heights[column] + 40
-
-	if content ~= "" then
-		label(card, content, 21, COLORS.text, DISPLAY, { Size = UDim2.new(1, 0, 0, 26), LayoutOrder = 0, TextTruncate = Enum.TextTruncate.AtEnd })
-	else
-		self.heights[column] = self.heights[column] - 22
-	end
+	local holder = create("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = self.order }, self.list)
+	label(holder, spaced(content), 9, COLORS.faint, BOLD, { Position = UDim2.fromOffset(2, 13), Size = UDim2.new(1, -4, 0, 14), TextTruncate = Enum.TextTruncate.AtEnd })
 end
 
+-- A paragraph: raised, padded, dim text.
 ---@param content string
 ---@return table
 function Tab:AddLabel(content)
-	local card = currentCard(self)
 	self.order = self.order + 1
-	self.heights[self.column] = self.heights[self.column] + 30
 
-	local item = label(card, content, 12, COLORS.muted, BODY, {
+	local card = create("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = COLORS.card, BorderSizePixel = 0, LayoutOrder = self.order }, self.list)
+	corner(card, RADIUS)
+	stroke(card, 0.5, 1, COLORS.line)
+	create("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12) }, card)
+
+	local item = label(card, content, 12, COLORS.dim, BODY, {
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Size = UDim2.new(1, 0, 0, 0),
 		TextWrapped = true,
 		TextYAlignment = Enum.TextYAlignment.Top,
-		LayoutOrder = self.order,
 	})
 
 	return {
@@ -373,16 +521,15 @@ end
 
 ---@param opts table
 function Tab:AddButton(opts)
-	-- An outlined button: hairline border, ivory type; hovering fills it a little.
-	local row, scale = newRow(self, 36, true, 0.96, 0.86)
-	stroke(row, 0.6)
-	label(row, opts.Text, 12, COLORS.text, BOLD, {
+	local row, scale = newRow(self, 38, true)
+	label(row, opts.Text, 13, COLORS.text, STRONG, {
 		Size = UDim2.fromScale(1, 1),
 		TextXAlignment = Enum.TextXAlignment.Center,
 	})
 
 	track(row.Activated:Connect(function()
 		squish(scale)
+		active.sfx("click")
 		safeCall(opts.Callback)
 	end))
 end
@@ -402,31 +549,30 @@ local function keyLabel(key)
 	return short[key.Name] or key.Name
 end
 
--- A toggle row. Every toggle gets a bind chip (click it, press a key; Esc / Backspace clears) unless Bind = false, and
--- is listed in the on-screen keybind list while enabled unless NoList = true.
+-- A toggle row: a pill switch on the right. Every toggle gets a bind chip (click it, press a key; Esc / Backspace clears)
+-- unless Bind = false, and is listed in the on-screen keybind list while enabled unless NoList = true.
 ---@param opts table
 ---@return table
 function Tab:AddToggle(opts)
 	local value = false
 	local key = opts.Key
 	local bindable = opts.Bind ~= false and not opts.NoFlag
-	-- Long text wraps onto more lines and the row grows to fit, so a sentence is never cut off.
-	local reserved = bindable and 122 or 70
-	local measured = textService:GetTextSize(tostring(opts.Text), 13, BODY, Vector2.new(ROW_WIDTH - reserved, 1000))
-	local row, scale = newRow(self, math.max(36, math.ceil(measured.Y) + 16), true)
-	label(row, opts.Text, 13, COLORS.text, BODY, {
+	local reserved = bindable and 132 or 78
+	local height = math.max(ROW_HEIGHT, measure(opts.Text, ROW_TEXT - reserved) + 22)
+	local row, scale = newRow(self, height, true)
+	label(row, opts.Text, 13, COLORS.text, BOLD, {
 		Position = UDim2.fromOffset(12, 0),
 		Size = UDim2.new(1, -reserved, 1, 0),
 		TextWrapped = true,
 	})
 
-	local rail = create("Frame", { Size = UDim2.fromOffset(40, 22), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), BackgroundColor3 = COLORS.track, BackgroundTransparency = 0.2, BorderSizePixel = 0 }, row)
-	corner(rail, 4)
-	stroke(rail, 0.55)
-	local fill = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = COLORS.accent, BackgroundTransparency = 1, BorderSizePixel = 0 }, rail)
-	corner(fill, 4)
-	local knob = create("Frame", { Size = UDim2.fromOffset(16, 16), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = COLORS.muted, BorderSizePixel = 0 }, rail)
-	corner(knob, 3)
+	local rail = create("Frame", { Size = UDim2.fromOffset(38, 21), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), BackgroundColor3 = COLORS.hover, BorderSizePixel = 0, ZIndex = 2 }, row)
+	corner(rail, 999)
+	local railStroke = stroke(rail, 0.4, 1, COLORS.lineStrong)
+	local fill = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = COLORS.accent, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 2 }, rail)
+	corner(fill, 999)
+	local knob = create("Frame", { Size = UDim2.fromOffset(15, 15), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = COLORS.dim, BorderSizePixel = 0, ZIndex = 3 }, rail)
+	corner(knob, 999)
 
 	local chip
 	if bindable then
@@ -436,15 +582,16 @@ function Tab:AddToggle(opts)
 			Font = MONO,
 			TextSize = 10,
 			TextColor3 = COLORS.muted,
-			Size = UDim2.fromOffset(50, 20),
+			Size = UDim2.fromOffset(52, 22),
 			AnchorPoint = Vector2.new(1, 0.5),
-			Position = UDim2.new(1, -58, 0.5, 0),
+			Position = UDim2.new(1, -62, 0.5, 0),
 			BackgroundColor3 = COLORS.track,
-			BackgroundTransparency = 0.35,
+			BackgroundTransparency = 0,
 			BorderSizePixel = 0,
+			ZIndex = 2,
 		}, row)
-		corner(chip, 3)
-		stroke(chip, 0.7)
+		corner(chip, 5)
+		stroke(chip, 0.55, 1, COLORS.line)
 	end
 
 	local function refreshList()
@@ -456,13 +603,15 @@ function Tab:AddToggle(opts)
 		local was = value
 		value = incoming == true
 		entry.Value = value
-		tween(fill, 0.3, { BackgroundTransparency = value and 0 or 1 })
-		tween(knob, 0.2, { Position = UDim2.new(0, value and 21 or 3, 0.5, 0), BackgroundColor3 = value and COLORS.dark or COLORS.muted }, QUINT)
+		tween(fill, 0.25, { BackgroundTransparency = value and 0 or 1 })
+		tween(knob, 0.25, { Position = UDim2.new(0, value and 20 or 3, 0.5, 0), BackgroundColor3 = value and COLORS.ink or COLORS.dim }, QUINT)
+		tween(railStroke, 0.25, { Transparency = value and 1 or 0.4 })
 
 		if was ~= value then
 			self.enabled = self.enabled + (value and 1 or -1)
 			if self.refreshBadge then self.refreshBadge() end
 			refreshList()
+			if not silent then active.sfx(value and "toggle_on" or "toggle_off") end
 		end
 		if not silent then safeCall(opts.Callback, value) end
 	end
@@ -491,13 +640,13 @@ function Tab:AddToggle(opts)
 			key = incoming
 			HussUI.Flags[flagName].Value = key and key.Name or "None"
 			chip.Text = keyLabel(key)
-			chip.TextColor3 = key and COLORS.accent2 or COLORS.muted
+			chip.TextColor3 = key and COLORS.accent or COLORS.muted
 			refreshList()
 		end
 
 		HussUI.Flags[flagName] = { Type = "Bind", Value = key and key.Name or "None", Set = applyKey }
 		chip.Text = keyLabel(key)
-		chip.TextColor3 = key and COLORS.accent2 or COLORS.muted
+		chip.TextColor3 = key and COLORS.accent or COLORS.muted
 
 		track(chip.Activated:Connect(function()
 			if active.capturing then return end
@@ -540,26 +689,29 @@ function Tab:AddSlider(opts)
 	local maximum = opts.Max or 100
 	local increment = opts.Increment or 1
 
-	local row = newRow(self, 52, false)
-	label(row, opts.Text, 13, COLORS.text, BODY, {
-		Position = UDim2.fromOffset(12, 5),
-		Size = UDim2.new(1, -90, 0, 18),
-		TextTruncate = Enum.TextTruncate.AtEnd,
+	local height = math.max(50, measure(opts.Text, ROW_TEXT - 170) + 26)
+	local row = newRow(self, height, false)
+	label(row, opts.Text, 13, COLORS.text, BOLD, {
+		Position = UDim2.fromOffset(12, 8),
+		Size = UDim2.new(1, -170, 0, height - 16),
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
 	})
-	local readout = label(row, "", 12, COLORS.accent2, MONO, {
+	local readout = label(row, "", 11, COLORS.accent, MONO, {
 		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -12, 0, 5),
-		Size = UDim2.fromOffset(70, 18),
+		Position = UDim2.new(1, -12, 0, 8),
+		Size = UDim2.fromOffset(80, 13),
 		TextXAlignment = Enum.TextXAlignment.Right,
 	})
 
-	local rail = create("TextButton", { Text = "", AutoButtonColor = false, Size = UDim2.new(1, -24, 0, 4), Position = UDim2.new(0, 12, 0, 34), BackgroundColor3 = COLORS.track, BackgroundTransparency = 0, BorderSizePixel = 0 }, row)
-	corner(rail, 2)
-	stroke(rail, 0.75)
-	local fill = create("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = COLORS.accent, BorderSizePixel = 0 }, rail)
-	corner(fill, 2)
-	local knob = create("Frame", { Size = UDim2.fromOffset(12, 12), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), BackgroundColor3 = COLORS.accent, BorderSizePixel = 0, ZIndex = 3 }, rail)
-	corner(knob, 2)
+	local rail = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 1), Size = UDim2.fromOffset(132, 4), Position = UDim2.new(1, -12, 1, -12), BackgroundColor3 = COLORS.hover, BorderSizePixel = 0, ZIndex = 2 }, row)
+	corner(rail, 999)
+	local fill = create("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = COLORS.accent, BorderSizePixel = 0, ZIndex = 3 }, rail)
+	corner(fill, 999)
+	local knob = create("Frame", { Size = UDim2.fromOffset(11, 11), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), BackgroundColor3 = COLORS.text, BorderSizePixel = 0, ZIndex = 4 }, rail)
+	corner(knob, 999)
+	-- A taller invisible strip so the thin track is easy to grab.
+	local hit = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, 20, 0, 22), BackgroundTransparency = 1, ZIndex = 5 }, rail)
 
 	local entry
 	local function apply(incoming, silent)
@@ -583,10 +735,10 @@ function Tab:AddSlider(opts)
 		apply(minimum + (maximum - minimum) * alpha, false)
 	end
 
-	track(rail.InputBegan:Connect(function(input)
+	track(hit.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
-			tween(knob, 0.15, { Size = UDim2.fromOffset(15, 15) }, QUINT)
+			tween(knob, 0.15, { Size = UDim2.fromOffset(14, 14) }, QUINT)
 			fromInput(input.Position)
 		end
 	end))
@@ -598,7 +750,7 @@ function Tab:AddSlider(opts)
 	track(userInputService.InputEnded:Connect(function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
 			dragging = false
-			tween(knob, 0.15, { Size = UDim2.fromOffset(12, 12) }, QUINT)
+			tween(knob, 0.15, { Size = UDim2.fromOffset(11, 11) }, QUINT)
 		end
 	end))
 
@@ -612,30 +764,31 @@ function Tab:AddDropdown(opts)
 	local value = opts.Default or options[1]
 	local open = false
 
-	local row = newRow(self, 36, false)
+	local height = math.max(ROW_HEIGHT, measure(opts.Text, ROW_TEXT - 230) + 22)
+	local row = newRow(self, height, false)
 	row.ClipsDescendants = true
 
-	local header = create("TextButton", { Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 36) }, row)
-	label(header, opts.Text, 13, COLORS.text, BODY, {
+	local header = create("TextButton", { Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, height) }, row)
+	label(header, opts.Text, 13, COLORS.text, BOLD, {
 		Position = UDim2.fromOffset(12, 0),
-		Size = UDim2.new(1, -130, 1, 0),
-		TextTruncate = Enum.TextTruncate.AtEnd,
+		Size = UDim2.new(1, -230, 1, 0),
+		TextWrapped = true,
 	})
-	local readout = label(header, "", 11, COLORS.accent2, MONO, {
+	local readout = label(header, "", 11, COLORS.accent, MONO, {
 		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -32, 0, 0),
-		Size = UDim2.fromOffset(100, 36),
+		Position = UDim2.new(1, -36, 0, 0),
+		Size = UDim2.fromOffset(170, height),
 		TextXAlignment = Enum.TextXAlignment.Right,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 	})
 
 	-- Gotham has no arrow glyph, so the chevron is two rotated bars.
-	local chevron = create("Frame", { Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), BackgroundTransparency = 1 }, header)
+	local chevron = create("Frame", { Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), BackgroundTransparency = 1 }, header)
 	for _, arm in { { x = 4.5, rotation = 45 }, { x = 9.5, rotation = -45 } } do
 		create("Frame", { Size = UDim2.fromOffset(8, 2), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(arm.x, 7), Rotation = arm.rotation, BorderSizePixel = 0, BackgroundColor3 = COLORS.muted }, chevron)
 	end
 
-	local list = create("Frame", { Size = UDim2.new(1, -12, 0, 0), Position = UDim2.fromOffset(6, 38), BackgroundTransparency = 1 }, row)
+	local list = create("Frame", { Size = UDim2.new(1, -12, 0, 0), Position = UDim2.fromOffset(6, height + 2), BackgroundTransparency = 1 }, row)
 	create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, list)
 
 	local entry
@@ -644,8 +797,8 @@ function Tab:AddDropdown(opts)
 	local function paint()
 		for name, button in buttons do
 			local selected = name == value
-			tween(button, 0.2, { BackgroundTransparency = selected and 0.8 or 1 })
-			button.Font = selected and BOLD or BODY
+			tween(button, 0.2, { BackgroundTransparency = selected and 0.86 or 1 })
+			button.Font = selected and STRONG or BODY
 		end
 	end
 
@@ -661,7 +814,7 @@ function Tab:AddDropdown(opts)
 
 	local function setOpen(state)
 		open = state
-		tween(row, 0.35, { Size = UDim2.new(1, 0, 0, open and (36 + #options * 30 + 8) or 36) }, QUINT)
+		tween(row, 0.35, { Size = UDim2.new(1, 0, 0, open and (height + #options * 30 + 10) or height) }, QUINT)
 		tween(chevron, 0.3, { Rotation = open and 180 or 0 }, BACK)
 	end
 
@@ -684,11 +837,12 @@ function Tab:AddDropdown(opts)
 				BorderSizePixel = 0,
 				LayoutOrder = index,
 			}, list)
-			corner(button, 6)
+			corner(button, 5)
 			buttons[name] = button
 
 			track(button.Activated:Connect(function()
 				apply(name, false)
+				active.sfx("click")
 				setOpen(false)
 			end))
 		end
@@ -699,6 +853,7 @@ function Tab:AddDropdown(opts)
 	apply(value, true)
 
 	track(header.Activated:Connect(function()
+		active.sfx("click")
 		setOpen(not open)
 	end))
 
@@ -718,11 +873,12 @@ end
 ---@return table
 function Tab:AddKeybind(opts)
 	local key = opts.Default
-	local row = newRow(self, 36, false)
-	label(row, opts.Text, 13, COLORS.text, BODY, {
+	local height = math.max(ROW_HEIGHT, measure(opts.Text, ROW_TEXT - 110) + 22)
+	local row = newRow(self, height, false)
+	label(row, opts.Text, 13, COLORS.text, BOLD, {
 		Position = UDim2.fromOffset(12, 0),
-		Size = UDim2.new(1, -96, 1, 0),
-		TextTruncate = Enum.TextTruncate.AtEnd,
+		Size = UDim2.new(1, -110, 1, 0),
+		TextWrapped = true,
 	})
 
 	local pill = create("TextButton", {
@@ -730,17 +886,16 @@ function Tab:AddKeybind(opts)
 		AutoButtonColor = false,
 		Font = MONO,
 		TextSize = 11,
-		TextColor3 = COLORS.accent2,
-		Size = UDim2.fromOffset(72, 24),
+		TextColor3 = COLORS.accent,
+		Size = UDim2.fromOffset(78, 26),
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -8, 0.5, 0),
+		Position = UDim2.new(1, -12, 0.5, 0),
 		BackgroundColor3 = COLORS.track,
-		BackgroundTransparency = 0.25,
 		BorderSizePixel = 0,
 	}, row)
-	corner(pill, 3)
-	stroke(pill, 0.65)
+	corner(pill, 5)
+	stroke(pill, 0.55, 1, COLORS.line)
 
 	local entry
 	local function apply(incoming, silent)
@@ -789,8 +944,8 @@ end
 ---@param opts table
 ---@return table
 function Tab:AddInput(opts)
-	local row = newRow(self, 36, false)
-	label(row, opts.Text, 13, COLORS.text, BODY, {
+	local row = newRow(self, ROW_HEIGHT, false)
+	label(row, opts.Text, 13, COLORS.text, BOLD, {
 		Position = UDim2.fromOffset(12, 0),
 		Size = UDim2.new(0.4, 0, 1, 0),
 		TextTruncate = Enum.TextTruncate.AtEnd,
@@ -799,21 +954,20 @@ function Tab:AddInput(opts)
 	local box = create("TextBox", {
 		Text = "",
 		PlaceholderText = opts.Placeholder or "",
-		PlaceholderColor3 = COLORS.muted,
+		PlaceholderColor3 = COLORS.faint,
 		TextColor3 = COLORS.text,
-		Font = BODY,
-		TextSize = 12,
+		Font = MONO,
+		TextSize = 11,
 		ClearTextOnFocus = false,
 		TextXAlignment = Enum.TextXAlignment.Left,
-		Size = UDim2.new(0.55, -16, 0, 24),
+		Size = UDim2.new(0.5, -16, 0, 28),
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -8, 0.5, 0),
+		Position = UDim2.new(1, -12, 0.5, 0),
 		BackgroundColor3 = COLORS.track,
-		BackgroundTransparency = 0.25,
 		BorderSizePixel = 0,
 	}, row)
-	corner(box, 6)
-	stroke(box, 0.8)
+	corner(box, 5)
+	stroke(box, 0.55, 1, COLORS.line)
 	create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, box)
 
 	local entry
@@ -846,20 +1000,20 @@ function Tab:AddColor(opts)
 	local value = opts.Default or Color3.new(1, 1, 1)
 	local open = false
 
-	local row = newRow(self, 36, false)
+	local row = newRow(self, ROW_HEIGHT, false)
 	row.ClipsDescendants = true
 
-	local header = create("TextButton", { Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 36) }, row)
-	label(header, opts.Text, 13, COLORS.text, BODY, {
+	local header = create("TextButton", { Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, ROW_HEIGHT) }, row)
+	label(header, opts.Text, 13, COLORS.text, BOLD, {
 		Position = UDim2.fromOffset(12, 0),
-		Size = UDim2.new(1, -70, 1, 0),
+		Size = UDim2.new(1, -80, 1, 0),
 		TextTruncate = Enum.TextTruncate.AtEnd,
 	})
-	local swatch = create("Frame", { Size = UDim2.fromOffset(34, 18), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), BorderSizePixel = 0 }, header)
-	corner(swatch, 6)
-	stroke(swatch, 0.6)
+	local swatch = create("Frame", { Size = UDim2.fromOffset(34, 18), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), BorderSizePixel = 0 }, header)
+	corner(swatch, 5)
+	stroke(swatch, 0.5, 1, COLORS.lineStrong)
 
-	local grid = create("Frame", { Position = UDim2.fromOffset(10, 40), Size = UDim2.new(1, -20, 0, 64), BackgroundTransparency = 1 }, row)
+	local grid = create("Frame", { Position = UDim2.fromOffset(12, ROW_HEIGHT), Size = UDim2.new(1, -24, 0, 64), BackgroundTransparency = 1 }, row)
 	create("UIGridLayout", { CellSize = UDim2.fromOffset(30, 26), CellPadding = UDim2.fromOffset(6, 6), SortOrder = Enum.SortOrder.LayoutOrder }, grid)
 
 	local entry
@@ -878,8 +1032,8 @@ function Tab:AddColor(opts)
 
 	for index, hex in PALETTE do
 		local chip = create("TextButton", { Text = "", AutoButtonColor = false, BackgroundColor3 = fromHex(hex), BorderSizePixel = 0, LayoutOrder = index }, grid)
-		corner(chip, 6)
-		stroke(chip, 0.7)
+		corner(chip, 5)
+		stroke(chip, 0.6, 1, COLORS.lineStrong)
 		track(chip.Activated:Connect(function()
 			apply(fromHex(hex), false)
 		end))
@@ -887,37 +1041,36 @@ function Tab:AddColor(opts)
 
 	track(header.Activated:Connect(function()
 		open = not open
-		tween(row, 0.35, { Size = UDim2.new(1, 0, 0, open and 112 or 36) }, QUINT)
+		tween(row, 0.35, { Size = UDim2.new(1, 0, 0, open and ROW_HEIGHT + 76 or ROW_HEIGHT) }, QUINT)
 	end))
 
 	return entry
 end
 
--- A full-width row of stat cards: small title, value, one line of detail. Get returns valueText, alpha 0..1 (1 = on), subText.
+-- A full-width row of tiles: small tracked title, value, one line of detail. Get returns valueText, alpha 0..1 (1 = on), subText.
 ---@param specs table
 function Tab:AddStatRow(specs)
 	self.order = self.order + 1
 
-	local holder = create("Frame", { Size = UDim2.new(1, 0, 0, 90), BackgroundTransparency = 1, LayoutOrder = self.order - 1000 }, self.list)
-	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 12), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
+	local holder = create("Frame", { Size = UDim2.new(1, 0, 0, 68), BackgroundTransparency = 1, LayoutOrder = self.order }, self.list)
+	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 10), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
 
 	local count = #specs
 	for index, spec in specs do
 		local card = create("Frame", {
-			Size = UDim2.new(1 / count, -12 * (count - 1) / count, 1, 0),
+			Size = UDim2.new(1 / count, -10 * (count - 1) / count, 1, 0),
 			BackgroundColor3 = COLORS.card,
-			BackgroundTransparency = 0,
 			BorderSizePixel = 0,
 			ClipsDescendants = true,
 			LayoutOrder = index,
 		}, holder)
-		corner(card, 6)
-		stroke(card, 0.9)
+		corner(card, RADIUS)
+		stroke(card, 0.5, 1, COLORS.line)
 
 		local truncate = Enum.TextTruncate.AtEnd
-		label(card, string.upper(spec.Title), 10, COLORS.muted, MONO, { Position = UDim2.fromOffset(14, 11), Size = UDim2.new(1, -28, 0, 14), TextTruncate = truncate })
-		local value = label(card, "", 29, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(14, 28), Size = UDim2.new(1, -28, 0, 34), TextTruncate = truncate })
-		local sub = label(card, "", 10, COLORS.muted, MONO, { Position = UDim2.fromOffset(14, 66), Size = UDim2.new(1, -28, 0, 14), TextTruncate = truncate })
+		label(card, string.upper(spec.Title), 10, COLORS.faint, BOLD, { Position = UDim2.fromOffset(12, 10), Size = UDim2.new(1, -24, 0, 12), TextTruncate = truncate })
+		local value = label(card, "", 15, COLORS.accent, MONO, { Position = UDim2.fromOffset(12, 26), Size = UDim2.new(1, -24, 0, 18), TextTruncate = truncate })
+		local sub = label(card, "", 9, COLORS.muted, MONO, { Position = UDim2.fromOffset(12, 47), Size = UDim2.new(1, -24, 0, 12), TextTruncate = truncate })
 
 		table.insert(active.statCards, { spec = spec, value = value, sub = sub, segments = {}, shown = -1 })
 	end
@@ -929,9 +1082,9 @@ end
 function Tab:AddWide(height)
 	self.order = self.order + 1
 
-	local holder = create("Frame", { Size = UDim2.new(1, 0, 0, height), BackgroundColor3 = COLORS.card, BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = self.order - 1000 }, self.list)
-	corner(holder, 6)
-	stroke(holder, 0.9)
+	local holder = create("Frame", { Size = UDim2.new(1, 0, 0, height), BackgroundColor3 = COLORS.card, BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = self.order }, self.list)
+	corner(holder, RADIUS)
+	stroke(holder, 0.5, 1, COLORS.line)
 	return holder
 end
 
@@ -978,9 +1131,9 @@ end
 ---@return table
 function Tab:AddFilm(spec)
 	local Edits = spec.Edits
-	local card = self:AddWide(404)
+	local card = self:AddWide(372)
 
-	local STAGE_W, STAGE_H = 218, 388
+	local STAGE_W, STAGE_H = 196, 348
 	local stageHost = create("Frame", { Position = UDim2.fromOffset(8, 8), Size = UDim2.fromOffset(STAGE_W, STAGE_H), BackgroundColor3 = Color3.fromRGB(4, 4, 4), BorderSizePixel = 0, ClipsDescendants = true }, card)
 	corner(stageHost, 4)
 	stroke(stageHost, 0.8)
@@ -1141,7 +1294,7 @@ function Tab:AddFilm(spec)
 	end))
 
 	-- The list of edits.
-	local listTop = 172
+	local listTop = 168
 	local listHolder = create("Frame", { Position = UDim2.fromOffset(rightX, listTop), Size = UDim2.new(1, -rightX - 16, 1, -listTop - 12), BackgroundTransparency = 1 }, card)
 	create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, listHolder)
 	local listNotice = label(listHolder, "LOADING THE EDIT LIBRARY", 10, COLORS.muted, MONO, { Size = UDim2.new(1, 0, 0, 20) })
@@ -1150,15 +1303,15 @@ function Tab:AddFilm(spec)
 		listNotice:Destroy()
 		local thumbs = Edits.thumbs()
 		for index, edit in Edits.manifest.edits do
-			local row = create("TextButton", { Text = "", AutoButtonColor = false, Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = COLORS.row, BackgroundTransparency = 0.96, BorderSizePixel = 0, LayoutOrder = index }, listHolder)
+			local row = create("TextButton", { Text = "", AutoButtonColor = false, Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = COLORS.row, BackgroundTransparency = 0.96, BorderSizePixel = 0, LayoutOrder = index }, listHolder)
 			corner(row, 4)
 			local mark = create("Frame", { Size = UDim2.fromOffset(2, 22), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), BackgroundColor3 = COLORS.accent, BackgroundTransparency = 1, BorderSizePixel = 0 }, row)
-			local cover = create("ImageLabel", { Position = UDim2.fromOffset(10, 4), Size = UDim2.fromOffset(20, 32), BackgroundColor3 = COLORS.track, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Crop, Image = thumbs or "", ImageRectOffset = Vector2.new((edit.thumb or 0) * 144, 0), ImageRectSize = Vector2.new(144, 256) }, row)
+			local cover = create("ImageLabel", { Position = UDim2.fromOffset(10, 3), Size = UDim2.fromOffset(16, 28), BackgroundColor3 = COLORS.track, BorderSizePixel = 0, ScaleType = Enum.ScaleType.Crop, Image = thumbs or "", ImageRectOffset = Vector2.new((edit.thumb or 0) * 144, 0), ImageRectSize = Vector2.new(144, 256) }, row)
 			corner(cover, 2)
-			label(row, string.format("%02d", index), 10, COLORS.muted, MONO, { Position = UDim2.fromOffset(40, 0), Size = UDim2.fromOffset(22, 40) })
-			label(row, edit.title, 13, COLORS.text, BODY, { Position = UDim2.fromOffset(66, 5), Size = UDim2.new(1, -190, 0, 16), TextTruncate = Enum.TextTruncate.AtEnd })
-			label(row, string.upper(edit.subtitle or ""), 9, COLORS.muted, MONO, { Position = UDim2.fromOffset(66, 22), Size = UDim2.new(1, -190, 0, 12), TextTruncate = Enum.TextTruncate.AtEnd })
-			local status = label(row, "", 10, COLORS.muted, MONO, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 0), Size = UDim2.fromOffset(110, 40), TextXAlignment = Enum.TextXAlignment.Right })
+			label(row, string.format("%02d", index), 10, COLORS.muted, MONO, { Position = UDim2.fromOffset(36, 0), Size = UDim2.fromOffset(22, 34) })
+			label(row, edit.title, 13, COLORS.text, BODY, { Position = UDim2.fromOffset(62, 2), Size = UDim2.new(1, -190, 0, 16), TextTruncate = Enum.TextTruncate.AtEnd })
+			label(row, string.upper(edit.subtitle or ""), 9, COLORS.muted, MONO, { Position = UDim2.fromOffset(62, 18), Size = UDim2.new(1, -190, 0, 12), TextTruncate = Enum.TextTruncate.AtEnd })
+			local status = label(row, "", 10, COLORS.muted, MONO, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 0), Size = UDim2.fromOffset(110, 34), TextXAlignment = Enum.TextXAlignment.Right })
 
 			local entry = {}
 			function entry.refresh()
@@ -1254,30 +1407,47 @@ function Tab:AddFilm(spec)
 	}
 end
 
--- Window -----------------------------------------------------------------------------------------------------
+-- Window -----------------------------------------------------------------------------------------------------------------
 
 local Window = {}
 Window.__index = Window
 
--- Letter-spaced small caps, the way the reference sets its labels.
----@param content string
----@return string
-local function spaced(content)
-	local result = string.gsub(string.upper(content), ".", function(character)
-		return character == " " and "  " or (character .. " ")
-	end)
-	return (string.gsub(result, "%s+$", ""))
-end
-
 ---@param name string
 function Window:CreateCategory(name)
 	self.order = self.order + 1
-	label(self.tabList, spaced(name), 10, COLORS.muted, MONO, {
-		Size = UDim2.new(1, 0, 0, 24),
+	label(self.navList, spaced(name), 9, COLORS.faint, BOLD, {
+		Size = UDim2.new(1, 0, 0, 30),
 		LayoutOrder = self.order,
 		TextYAlignment = Enum.TextYAlignment.Bottom,
 		Position = UDim2.fromOffset(10, 0),
 	}).Name = "Category"
+end
+
+-- Whether a tab is on screen right now.
+---@param tab table
+---@return boolean
+local function tabIsShown(tab)
+	return active ~= nil and active.visible and tab.window.current == tab
+end
+
+-- Moves the sliding pill and edge bar to a tab. The tab's place is read from the layout, so any order of tabs works.
+---@param window table
+---@param tab table
+---@param immediate boolean
+local function movePill(window, tab, immediate)
+	local factor = math.max(window.main.AbsoluteSize.X / WINDOW_WIDTH, 0.01)
+	local offset = (tab.button.AbsolutePosition.Y - window.navList.AbsolutePosition.Y) / factor
+	local pillPosition = UDim2.fromOffset(0, offset)
+	-- The bar lives in the sidebar (the nav list would clip it), so the nav list's own offset and scroll are added here.
+	local barPosition = UDim2.fromOffset(1, window.navHolder.Position.Y.Offset + offset - window.navHolder.CanvasPosition.Y + TAB_HEIGHT * 0.275)
+
+	window.pill.Visible, window.pillBar.Visible = true, true
+	if immediate then
+		window.pill.Position, window.pillBar.Position = pillPosition, barPosition
+	else
+		tween(window.pill, 0.45, { Position = pillPosition })
+		tween(window.pillBar, 0.45, { Position = barPosition })
+	end
 end
 
 ---@param tab table
@@ -1291,10 +1461,9 @@ local function selectTab(tab)
 	if previous then
 		previous.group.Visible = true
 		tween(previous.group, 0.18, { GroupTransparency = 1 })
-		tween(previous.hl, 0.25, { BackgroundTransparency = 1 })
-		tween(previous.bar, 0.25, { BackgroundTransparency = 1, Size = UDim2.fromOffset(2, 6) })
 		tween(previous.title, 0.25, { TextColor3 = COLORS.muted })
 		tween(previous.glyph, 0.25, { ImageColor3 = COLORS.muted })
+		if previous.animated then tween(previous.animated.image, 0.25, { ImageColor3 = COLORS.muted }) end
 		task.delay(0.2, function()
 			if window.current ~= previous and previous.group.Parent then previous.group.Visible = false end
 		end)
@@ -1302,18 +1471,22 @@ local function selectTab(tab)
 
 	tab.group.Visible = true
 	tab.group.GroupTransparency = 1
-	tab.group.Position = UDim2.fromOffset(0, 18)
+	tab.group.Position = UDim2.fromOffset(0, 24)
 	tab.scale.Scale = 0.985
 	tween(tab.group, 0.5, { GroupTransparency = 0, Position = UDim2.fromOffset(0, 0) })
 	tween(tab.scale, 0.5, { Scale = 1 })
-	tween(tab.hl, 0.2, { BackgroundTransparency = 0.94 })
-	tween(tab.bar, 0.3, { BackgroundTransparency = 0, Size = UDim2.fromOffset(2, 20) })
 	tween(tab.title, 0.25, { TextColor3 = COLORS.text })
 	tween(tab.glyph, 0.25, { ImageColor3 = COLORS.text })
+	if tab.animated then
+		tween(tab.animated.image, 0.25, { ImageColor3 = COLORS.text })
+		tab.animated:play()
+	end
+	movePill(window, tab, previous == nil)
+	if previous then active.sfx("tab") end
 
-	-- The page heading fades in again for every tab, like the reference's masked transitions.
+	-- The page heading fades in again for every tab.
 	window.pageTitle.Text = tab.name
-	window.pageSub.Text = string.upper(tab.subtitle or "")
+	window.pageSub.Text = tab.subtitle or ""
 	window.pageTitle.TextTransparency = 1
 	window.pageSub.TextTransparency = 1
 	tween(window.pageTitle, 0.45, { TextTransparency = 0 })
@@ -1323,22 +1496,27 @@ end
 ---@param window table
 ---@param name string
 ---@param iconName string?
----@param listParent Instance
 ---@param order number
 ---@return table
-local function makeTab(window, name, iconName, listParent, order)
-	local tab = setmetatable({ name = name, window = window, order = 0, enabled = 0, heights = { 0, 0 }, column = 1 }, Tab)
+local function makeTab(window, name, iconName, order)
+	local tab = setmetatable({ name = name, window = window, order = 0, enabled = 0 }, Tab)
 
-	local button = create("TextButton", { Text = "", AutoButtonColor = false, Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = order }, listParent)
-	tab.hl = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = COLORS.row, BackgroundTransparency = 1, BorderSizePixel = 0 }, button)
-	corner(tab.hl, 4)
-	tab.bar = create("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(2, 6), BackgroundColor3 = COLORS.accent, BackgroundTransparency = 1, BorderSizePixel = 0 }, button)
+	local button = create("TextButton", { Text = "", AutoButtonColor = false, Size = UDim2.new(1, 0, 0, TAB_HEIGHT), BackgroundColor3 = COLORS.row, BackgroundTransparency = 1, BorderSizePixel = 0, LayoutOrder = order }, window.navList)
+	corner(button, RADIUS)
+	tab.button = button
 
 	local glyphImage = icon(iconName)
-	tab.glyph = create("ImageLabel", { Image = glyphImage, ImageColor3 = COLORS.muted, BackgroundTransparency = 1, Size = UDim2.fromOffset(16, 16), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), Visible = glyphImage ~= "" }, button)
-	tab.title = label(button, name, 14, COLORS.muted, BODY, { Position = UDim2.fromOffset(glyphImage ~= "" and 40 or 16, 0), Size = UDim2.new(1, -(glyphImage ~= "" and 76 or 52), 1, 0), TextTruncate = Enum.TextTruncate.AtEnd })
+	tab.glyph = create("ImageLabel", { Image = glyphImage, ImageColor3 = COLORS.muted, BackgroundTransparency = 1, Size = UDim2.fromOffset(20, 20), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), Visible = glyphImage ~= "" }, button)
+	tab.title = label(button, name, 14, COLORS.muted, BODY, { Position = UDim2.fromOffset(46, 0), Size = UDim2.new(1, -86, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd })
 
-	-- Count of switched-on toggles, set in mono beside the tab name.
+	-- The animated line icon from the reference. It appears once the asset pack is on disk and replaces the still glyph.
+	local animatedName = TAB_ICONS[name]
+	if animatedName then
+		tab.animated = newIcon(button, animatedName, 24, UDim2.new(0, 12, 0.5, 0))
+		tab.animated.owner = tab
+	end
+
+	-- Count of switched-on toggles, set in mono at the right.
 	local badge = create("TextLabel", { Text = "0", Font = MONO, TextSize = 10, TextColor3 = COLORS.accent2, BackgroundTransparency = 1, Visible = false, Size = UDim2.fromOffset(24, 16), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), TextXAlignment = Enum.TextXAlignment.Right }, button)
 	tab.refreshBadge = function()
 		badge.Visible = tab.enabled > 0
@@ -1352,27 +1530,20 @@ local function makeTab(window, name, iconName, listParent, order)
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		ScrollBarThickness = 2,
-		ScrollBarImageColor3 = COLORS.muted,
+		ScrollBarImageColor3 = COLORS.lineStrong,
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		CanvasSize = UDim2.new(),
 	}, tab.group)
-	create("UIListLayout", { Padding = UDim.new(0, 12), SortOrder = Enum.SortOrder.LayoutOrder }, tab.list)
-	create("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingLeft = UDim.new(0, 2), PaddingBottom = UDim.new(0, 12), PaddingRight = UDim.new(0, 10) }, tab.list)
-
-	-- Two columns of cards under any stat row.
-	local holder = create("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 1 }, tab.list)
-	create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 12), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
-	tab.columns = {}
-	for index = 1, 2 do
-		tab.columns[index] = create("Frame", { Size = UDim2.new(0.5, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = index }, holder)
-		create("UIListLayout", { Padding = UDim.new(0, 12), SortOrder = Enum.SortOrder.LayoutOrder }, tab.columns[index])
-	end
+	create("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, tab.list)
+	create("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingLeft = UDim.new(0, 1), PaddingBottom = UDim.new(0, 14), PaddingRight = UDim.new(0, 12) }, tab.list)
 
 	track(button.MouseEnter:Connect(function()
-		if window.current ~= tab then tween(tab.hl, 0.2, { BackgroundTransparency = 0.96 }) end
+		if window.current ~= tab then tween(button, 0.2, { BackgroundTransparency = 0.95 }) end
+		if tab.animated then tab.animated:play() end
+		active.sfx("hover")
 	end))
 	track(button.MouseLeave:Connect(function()
-		if window.current ~= tab then tween(tab.hl, 0.25, { BackgroundTransparency = 1 }) end
+		tween(button, 0.25, { BackgroundTransparency = 1 })
 	end))
 	track(button.Activated:Connect(function()
 		selectTab(tab)
@@ -1390,9 +1561,16 @@ end
 function Window:CreateTab(name, iconName, subtitle)
 	self.order = self.order + 1
 
-	local tab = makeTab(self, name, iconName, self.tabList, self.order)
+	local tab = makeTab(self, name, iconName, self.order)
 	tab.subtitle = subtitle
-	if not self.current then selectTab(tab) end
+
+	-- Only the first tab opens by itself; the layout needs a frame before the pill can be placed.
+	if not self.first then
+		self.first = tab
+		task.defer(function()
+			if active and not self.current then selectTab(tab) end
+		end)
+	end
 
 	return tab
 end
@@ -1408,34 +1586,37 @@ function Window:SelectTab(name)
 	end
 end
 
--- A toast: mono edition line, serif title, dim body and a hairline that runs out with the timer.
+-- A toast: tracked edition line, serif title, dim body, the monogram on the left and a hairline that runs out with the timer.
 ---@param opts table
 function Window:Notify(opts)
 	local duration = opts.Duration or 4
 	local kinds = { info = "NOTICE", ok = "COMPLETE", warn = "ATTENTION", bad = "UNAVAILABLE" }
 
 	local holder = create("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 }, active.toastHost)
-	local card = create("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Position = UDim2.fromOffset(340, 0), BackgroundColor3 = COLORS.bg, BackgroundTransparency = 0, BorderSizePixel = 0, ClipsDescendants = true }, holder)
-	corner(card, 8)
-	stroke(card, 0.82)
+	local card = create("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, Position = UDim2.fromOffset(360, 0), BackgroundColor3 = COLORS.bg, BackgroundTransparency = 0, BorderSizePixel = 0, ClipsDescendants = true }, holder)
+	corner(card, 10)
+	stroke(card, 0.45, 1, COLORS.line)
 
-	local inner = create("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 }, card)
-	create("UIPadding", { PaddingLeft = UDim.new(0, 20), PaddingRight = UDim.new(0, 16), PaddingTop = UDim.new(0, 12), PaddingBottom = UDim.new(0, 18) }, inner)
+	label(card, "H", 35, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(20, 14), Size = UDim2.fromOffset(30, 40), TextXAlignment = Enum.TextXAlignment.Center })
+	local inner = create("Frame", { Position = UDim2.fromOffset(64, 0), Size = UDim2.new(1, -64, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 }, card)
+	create("UIPadding", { PaddingRight = UDim.new(0, 18), PaddingTop = UDim.new(0, 13), PaddingBottom = UDim.new(0, 20) }, inner)
 	create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, inner)
 
 	label(inner, "HUSS VALLEY  /  " .. (kinds[opts.Kind or "info"] or "NOTICE"), 9, COLORS.muted, MONO, { LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 12) })
 	label(inner, tostring(opts.Title or ""), 21, COLORS.text, DISPLAY, { LayoutOrder = 2, Size = UDim2.new(1, 0, 0, 26), TextTruncate = Enum.TextTruncate.AtEnd })
-	label(inner, tostring(opts.Text or ""), 12, COLORS.accent2, BODY, { LayoutOrder = 3, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0), TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top })
+	label(inner, tostring(opts.Text or ""), 12, COLORS.dim, BODY, { LayoutOrder = 3, AutomaticSize = Enum.AutomaticSize.Y, Size = UDim2.new(1, 0, 0, 0), TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top })
 
-	local timer = create("Frame", { Size = UDim2.new(1, -40, 0, 1), AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 20, 1, -8), BackgroundColor3 = COLORS.accent2, BackgroundTransparency = 0.3, BorderSizePixel = 0, ZIndex = 5 }, card)
+	local trackLine = create("Frame", { Size = UDim2.new(1, -40, 0, 1), AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 20, 1, -8), BackgroundColor3 = COLORS.line, BorderSizePixel = 0, ZIndex = 4 }, card)
+	local timer = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = COLORS.dim, BackgroundTransparency = 0.3, BorderSizePixel = 0, ZIndex = 5 }, trackLine)
 
 	tween(card, 0.35, { Position = UDim2.fromOffset(0, 0) }, QUINT)
-	tween(timer, duration, { Size = UDim2.new(0, 0, 0, 1) }, Enum.EasingStyle.Linear)
+	tween(timer, duration, { Size = UDim2.new(0, 0, 1, 0) }, Enum.EasingStyle.Linear)
+	active.sfx("saved")
 
 	task.delay(duration, function()
 		if not holder.Parent then return end
 
-		tween(card, 0.35, { Position = UDim2.fromOffset(340, 0) }, QUINT, IN)
+		tween(card, 0.35, { Position = UDim2.fromOffset(360, 0) }, QUINT, IN)
 		task.delay(0.4, function()
 			if holder.Parent then holder:Destroy() end
 		end)
@@ -1450,19 +1631,17 @@ function Window:AddWidget(spec)
 	local card = create("Frame", {
 		Size = UDim2.new(1, 0, 0, isBars and 196 or 112),
 		BackgroundColor3 = COLORS.card,
-		BackgroundTransparency = 0,
 		BorderSizePixel = 0,
 		LayoutOrder = #active.widgets + 1,
 		ClipsDescendants = true,
 	}, active.widgetHost)
-	corner(card, 6)
-	stroke(card, 0.9)
+	corner(card, RADIUS)
+	stroke(card, 0.5, 1, COLORS.line)
 
 	local glyph = create("ImageLabel", { Image = icon(spec.Icon), ImageColor3 = COLORS.text, ImageTransparency = 0.2, BackgroundTransparency = 1, Size = UDim2.fromOffset(14, 14), Position = UDim2.fromOffset(14, 13) }, card)
-	label(card, string.upper(spec.Title), 10, COLORS.muted, MONO, { Position = UDim2.fromOffset(spec.Icon and 34 or 14, 12), Size = UDim2.new(1, -48, 0, 16) })
-	local value = label(card, "", 28, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(14, 32), Size = UDim2.new(1, -28, 0, 32), TextTruncate = Enum.TextTruncate.AtEnd })
-	local sub = label(card, "", 10, COLORS.accent2, MONO, { Position = UDim2.fromOffset(14, 68), Size = UDim2.new(1, -28, 0, 14) })
-	sub.TextColor3 = COLORS.muted
+	label(card, string.upper(spec.Title), 10, COLORS.faint, BOLD, { Position = UDim2.fromOffset(spec.Icon and 34 or 14, 12), Size = UDim2.new(1, -48, 0, 16) })
+	local value = label(card, "", 15, COLORS.accent, MONO, { Position = UDim2.fromOffset(14, 34), Size = UDim2.new(1, -28, 0, 22), TextTruncate = Enum.TextTruncate.AtEnd })
+	local sub = label(card, "", 9, COLORS.muted, MONO, { Position = UDim2.fromOffset(14, 62), Size = UDim2.new(1, -28, 0, 14) })
 	if not spec.Icon then glyph.Visible = false end
 
 	local widget = { spec = spec, value = value, sub = sub, kind = spec.Kind, history = {}, elapsed = 0 }
@@ -1473,8 +1652,8 @@ function Window:AddWidget(spec)
 		widget.bars = {}
 		for index = 1, 9 do
 			widget.history[index] = 0
-			local bar = create("Frame", { Size = UDim2.new(1 / 9, -6 * 8 / 9, 0, 6), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.12, BorderSizePixel = 0, LayoutOrder = index }, chart)
-			corner(bar, 6)
+			local bar = create("Frame", { Size = UDim2.new(1 / 9, -6 * 8 / 9, 0, 6), BackgroundColor3 = COLORS.accent, BackgroundTransparency = 0.12, BorderSizePixel = 0, LayoutOrder = index }, chart)
+			corner(bar, 4)
 			widget.bars[index] = bar
 		end
 	else
@@ -1482,7 +1661,7 @@ function Window:AddWidget(spec)
 		create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, bar)
 		widget.segments = {}
 		for segment = 1, SEGMENTS do
-			widget.segments[segment] = create("Frame", { Size = UDim2.new(1 / SEGMENTS, -2 * (SEGMENTS - 1) / SEGMENTS, 1, 0), BackgroundColor3 = COLORS.row, BackgroundTransparency = 0.88, BorderSizePixel = 0, LayoutOrder = segment }, bar)
+			widget.segments[segment] = create("Frame", { Size = UDim2.new(1 / SEGMENTS, -2 * (SEGMENTS - 1) / SEGMENTS, 1, 0), BackgroundColor3 = COLORS.row, BackgroundTransparency = 0.9, BorderSizePixel = 0, LayoutOrder = segment }, bar)
 			corner(widget.segments[segment], 2)
 		end
 	end
@@ -1495,9 +1674,10 @@ function Window:IsOpen()
 	return active ~= nil and active.visible
 end
 
--- Opens or closes the window with a pop + fade and the background blur.
+-- Opens or closes the window with a pop + fade and the background blur. `byButton` (the X) hides the dock too.
 ---@param state boolean?
-function Window:Toggle(state)
+---@param quiet boolean?
+function Window:Toggle(state, quiet)
 	if state == nil then state = not active.visible end
 	if state == active.visible then return end
 
@@ -1505,18 +1685,30 @@ function Window:Toggle(state)
 	local blurWanted = HussUI.Flags.ui_blur == nil or HussUI.Flags.ui_blur.Value == true
 
 	if state then
+		active.dockHidden = false
 		active.root.Visible = true
 		active.pop.Scale = 0.97
-		tween(active.pop, 0.25, { Scale = 1 }, QUINT)
+		tween(active.pop, 0.35, { Scale = 1 }, QUINT)
 		active.cover.BackgroundTransparency = 0.2
 		tween(active.cover, 0.45, { BackgroundTransparency = 1 })
 		if blurWanted then tween(active.blur, 0.4, { Size = 12 }) end
+		if not quiet then active.sfx("open") end
 	else
 		tween(active.pop, 0.2, { Scale = 0.97 }, QUINT, IN)
 		tween(active.cover, 0.25, { BackgroundTransparency = 0.2 })
 		tween(active.blur, 0.3, { Size = 0 })
+		if not quiet then active.sfx("close") end
 		task.delay(0.3, function()
 			if active and not active.visible and active.root.Parent then active.root.Visible = false end
+		end)
+	end
+	if active.refreshDock then active.refreshDock() end
+
+	-- The pill is placed from the layout, which may not have run while the window was hidden.
+	if state then
+		task.defer(function()
+			local owner = active and active.window
+			if owner and owner.current then movePill(owner, owner.current, true) end
 		end)
 	end
 end
@@ -1620,7 +1812,8 @@ local function buildConfigs(window, settings, folder)
 	end })
 end
 
--- Slow ivory shimmer for the wordmark: the colour sequence is cycled (sliding a gradient's offset would uncover the base colour).
+-- Slow ivory shimmer for the serif title text: the colour sequence is cycled (sliding a gradient's offset would uncover the
+-- base colour).
 ---@param phase number
 ---@return ColorSequence
 local function chromeSequence(phase)
@@ -1643,13 +1836,15 @@ function HussUI:CreateWindow(opts)
 	shared.__HussUI = HussUI
 
 	local window = setmetatable({ tabs = {}, order = 0, toggleKey = opts.ToggleKey or Enum.KeyCode.RightShift }, Window)
-	active = { connections = {}, visible = false, capturing = false, onDestroy = opts.OnDestroy, widgets = {}, statCards = {}, listed = {} }
+	active = { connections = {}, visible = false, capturing = false, onDestroy = opts.OnDestroy, widgets = {}, statCards = {}, listed = {}, icons = {}, sounds = {}, sfx = playSfx, scaleMultiplier = 1 }
 
 	local showWidgets = opts.Widgets == true
 
 	local gui = create("ScreenGui", { Name = GUI_NAME, ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 1000, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, getGuiParent())
 	active.gui = gui
+	active.window = window
 	active.blur = create("BlurEffect", { Name = BLUR_NAME, Size = 0 }, lightingService)
+	ensureAssets()
 
 	local root = create("Frame", { Name = "Root", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(WINDOW_WIDTH, WINDOW_HEIGHT), BackgroundTransparency = 1, Visible = false }, gui)
 	active.root = root
@@ -1659,114 +1854,181 @@ function HussUI:CreateWindow(opts)
 		if not camera then return end
 
 		local viewport = camera.ViewportSize
-		-- The main panel stays centered; leave room for the widget column on both sides so it never leaves the screen.
+		-- Fits the screen the way the reference does (up to 1.6x), times the user's own size setting.
 		local span = showWidgets and (WINDOW_WIDTH + 2 * (WIDGET_GAP + WIDGET_WIDTH)) or WINDOW_WIDTH
-		fit.Scale = math.clamp(math.min(viewport.X / (span + 40), viewport.Y / (WINDOW_HEIGHT + 50)), 0.5, 1.15)
+		local automatic = math.clamp(math.min(viewport.X / (span + 40), viewport.Y / (WINDOW_HEIGHT + 50)), 0.5, 1.6)
+		fit.Scale = math.clamp(automatic * active.scaleMultiplier, 0.4, 2)
 	end
+	active.refit = refit
 	refit()
 	if workspace.CurrentCamera then track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(refit)) end
 
 	local body = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, root)
 	active.pop = create("UIScale", { Scale = 1 }, body)
 
+	-- Drop shadow: two soft layers behind the panel.
+	for _, layer in { { spread = 10, alpha = 0.86 }, { spread = 26, alpha = 0.93 } } do
+		local shadow = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 8), Size = UDim2.new(1, layer.spread * 2, 1, layer.spread * 2), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = layer.alpha, BorderSizePixel = 0, ZIndex = 0 }, body)
+		corner(shadow, 12 + layer.spread)
+	end
+
 	-- Main panel: one near-black plane with a hairline edge.
 	local main = create("Frame", { Name = "Main", Size = UDim2.fromOffset(WINDOW_WIDTH, WINDOW_HEIGHT), BackgroundColor3 = COLORS.bg, BackgroundTransparency = 0, BorderSizePixel = 0, ClipsDescendants = true }, body)
-	corner(main, 10)
-	stroke(main, 0.84, 1)
+	corner(main, 12)
+	stroke(main, 0.3, 1, COLORS.lineStrong)
+	window.main = main
 
-	-- Pinstripe field behind everything (a suit-cloth nod to the reference), with a slow sheen crossing it.
-	local stripes = create("Frame", { Name = "Pinstripe", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0 }, main)
-	for x = SIDEBAR_WIDTH + 12, WINDOW_WIDTH, 26 do
+	-- Light bleeding from the top edge.
+	local wash = create("Frame", { Size = UDim2.new(1, 0, 0, 260), BackgroundColor3 = COLORS.accent, BorderSizePixel = 0 }, main)
+	create("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.94), NumberSequenceKeypoint.new(1, 1) }), Rotation = 90 }, wash)
+
+	-- Pinstripe field (a suit-cloth nod to the reference's striped film background) with a slow sheen crossing it.
+	local stripes = create("Frame", { Name = "Pinstripe", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, main)
+	for x = SIDEBAR_WIDTH + 14, WINDOW_WIDTH, 24 do
 		create("Frame", { Position = UDim2.fromOffset(x, HEADER_HEIGHT), Size = UDim2.new(0, 1, 1, -HEADER_HEIGHT), BackgroundColor3 = COLORS.row, BackgroundTransparency = 0.975, BorderSizePixel = 0 }, stripes)
 	end
 	local sheen = create("Frame", { Position = UDim2.fromOffset(-300, HEADER_HEIGHT), Size = UDim2.new(0, 300, 1, -HEADER_HEIGHT), BackgroundColor3 = COLORS.row, BorderSizePixel = 0 }, stripes)
 	create("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.955), NumberSequenceKeypoint.new(1, 1) }) }, sheen)
 	tweenService:Create(sheen, TweenInfo.new(12, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1), { Position = UDim2.fromOffset(WINDOW_WIDTH, HEADER_HEIGHT) }):Play()
 
-	-- Header: wordmark, edition line, the Edits shortcut, key hint, close. It is also the drag handle.
+	-- Header: wordmark, edition line, the film shortcut, key hint, ping, minimise, close. It is also the drag handle.
 	local header = create("Frame", { Name = "Header", Size = UDim2.new(1, 0, 0, HEADER_HEIGHT), BackgroundTransparency = 1, Active = true }, main)
-	local wordmark = label(header, string.upper(tostring(opts.Title or "Hub")), 38, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(28, 14), Size = UDim2.fromOffset(360, 44) })
+	local wordmark = label(header, string.upper(tostring(opts.Title or "Hub")), 34, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(28, 18), Size = UDim2.fromOffset(340, 40) })
 	local shimmer = create("UIGradient", { Color = chromeSequence(0) }, wordmark)
-	label(header, "PRIVATE EDITION  /  " .. string.upper(tostring(opts.Subtitle or "")), 9, COLORS.muted, MONO, { Position = UDim2.fromOffset(30, 60), Size = UDim2.fromOffset(520, 14), TextTruncate = Enum.TextTruncate.AtEnd })
-	create("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = COLORS.row, BackgroundTransparency = 0.88, BorderSizePixel = 0 }, header)
+	label(header, "PRIVATE EDITION  /  " .. string.upper(tostring(opts.Subtitle or "")), 9, COLORS.faint, MONO, { Position = UDim2.fromOffset(30, 59), Size = UDim2.fromOffset(380, 12), TextTruncate = Enum.TextTruncate.AtEnd })
+	create("Frame", { Position = UDim2.fromOffset(0, HEADER_HEIGHT), Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = COLORS.line, BackgroundTransparency = 0.35, BorderSizePixel = 0 }, main)
 
-	local close = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -20, 0.5, 0), Size = UDim2.fromOffset(30, 30), BackgroundColor3 = COLORS.row, BackgroundTransparency = 1, BorderSizePixel = 0 }, header)
-	corner(close, 4)
-	stroke(close, 0.7)
-	for _, rotation in { 45, -45 } do
-		create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(12, 1), Rotation = rotation, BorderSizePixel = 0, BackgroundColor3 = COLORS.text }, close)
+	-- 30 px chrome buttons at the right edge.
+	local function chromeButton(offset, draw, callback)
+		local button = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, offset, 0.5, 0), Size = UDim2.fromOffset(30, 30), BackgroundColor3 = COLORS.hover, BackgroundTransparency = 1, BorderSizePixel = 0 }, header)
+		corner(button, 9)
+		draw(button)
+		track(button.MouseEnter:Connect(function()
+			tween(button, 0.2, { BackgroundTransparency = 0.2 })
+		end))
+		track(button.MouseLeave:Connect(function()
+			tween(button, 0.25, { BackgroundTransparency = 1 })
+		end))
+		track(button.Activated:Connect(callback))
 	end
-	track(close.MouseEnter:Connect(function()
-		tween(close, 0.2, { BackgroundColor3 = COLORS.bad, BackgroundTransparency = 0.5 })
-	end))
-	track(close.MouseLeave:Connect(function()
-		tween(close, 0.25, { BackgroundColor3 = COLORS.row, BackgroundTransparency = 1 })
-	end))
-	track(close.Activated:Connect(function()
+	chromeButton(-16, function(button)
+		for _, rotation in { 45, -45 } do
+			create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 1), Rotation = rotation, BorderSizePixel = 0, BackgroundColor3 = COLORS.muted }, button)
+		end
+	end, function()
+		active.dockHidden = true
 		window:Toggle(false)
-	end))
+	end)
+	chromeButton(-50, function(button)
+		create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(13, 1), BorderSizePixel = 0, BackgroundColor3 = COLORS.muted }, button)
+	end, function()
+		window:Toggle(false)
+	end)
 
-	local hint = create("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -62, 0.5, 0), Size = UDim2.fromOffset(104, 30), BackgroundTransparency = 1 }, header)
-	corner(hint, 4)
-	stroke(hint, 0.8)
-	window.keyHint = label(hint, string.upper(window.toggleKey.Name), 10, COLORS.muted, MONO, { Position = UDim2.fromOffset(8, 0), Size = UDim2.new(1, -16, 1, 0), TextXAlignment = Enum.TextXAlignment.Center, TextTruncate = Enum.TextTruncate.AtEnd })
+	-- Ping pill: a status dot and the live round-trip time.
+	local pill = create("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -88, 0.5, 0), Size = UDim2.fromOffset(88, 28), BackgroundColor3 = COLORS.card, BorderSizePixel = 0 }, header)
+	corner(pill, 999)
+	stroke(pill, 0.3, 1, COLORS.line)
+	local pingDot = create("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 11, 0.5, 0), Size = UDim2.fromOffset(6, 6), BackgroundColor3 = COLORS.good, BorderSizePixel = 0 }, pill)
+	corner(pingDot, 999)
+	local pingLabel = label(pill, "-- ms", 10, COLORS.dim, MONO, { Position = UDim2.fromOffset(23, 0), Size = UDim2.new(1, -28, 1, 0) })
+	window.pingLabel = pingLabel
 
-	-- The film shortcut: serif word with an underline that draws in on hover.
+	window.keyHint = label(header, string.upper(window.toggleKey.Name), 10, COLORS.faint, MONO, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -190, 0.5, 0), Size = UDim2.fromOffset(80, 14), TextXAlignment = Enum.TextXAlignment.Right })
+
+	-- The film shortcut: serif words with a shimmer and an underline that draws in on hover (the reference's "Giorgio Armani?").
+	local filmShimmer
 	if opts.FilmTab then
-		local films = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -184, 0.5, 0), Size = UDim2.fromOffset(110, 34), BackgroundTransparency = 1 }, header)
-		local word = label(films, opts.FilmLabel or "The edits", 22, COLORS.text, DISPLAY, { Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center })
+		local films = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(0, 0), Position = UDim2.new(1, -455, 0.5, -17), Size = UDim2.fromOffset(182, 34), BackgroundTransparency = 1 }, header)
+		local word = label(films, opts.FilmLabel or "The edits", 21, COLORS.text, DISPLAY, { Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center })
+		filmShimmer = create("UIGradient", { Color = chromeSequence(0) }, word)
 		local underline = create("Frame", { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.fromScale(0.5, 1), Size = UDim2.fromOffset(0, 1), BackgroundColor3 = COLORS.accent, BorderSizePixel = 0 }, films)
 		track(films.MouseEnter:Connect(function()
-			tween(underline, 0.35, { Size = UDim2.new(1, -16, 0, 1) })
-			tween(word, 0.3, { Position = UDim2.fromOffset(0, -2) })
+			tween(underline, 0.35, { Size = UDim2.new(1, -18, 0, 1) })
+			tween(films, 0.3, { Position = UDim2.new(1, -455, 0.5, -19) })
 		end))
 		track(films.MouseLeave:Connect(function()
 			tween(underline, 0.3, { Size = UDim2.fromOffset(0, 1) })
-			tween(word, 0.3, { Position = UDim2.fromOffset(0, 0) })
+			tween(films, 0.3, { Position = UDim2.new(1, -455, 0.5, -17) })
 		end))
 		track(films.Activated:Connect(function()
+			active.sfx("click")
 			window:SelectTab(opts.FilmTab)
 		end))
 	end
 
-	-- Sidebar: tabs, with a hairline on its right edge. The Settings tab is pinned to the bottom.
-	local sidebar = create("Frame", { Position = UDim2.fromOffset(0, HEADER_HEIGHT + 1), Size = UDim2.new(0, SIDEBAR_WIDTH, 1, -(HEADER_HEIGHT + 1)), BackgroundTransparency = 1, ClipsDescendants = true }, main)
-	create("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.new(0, 1, 1, 0), BackgroundColor3 = COLORS.row, BackgroundTransparency = 0.9, BorderSizePixel = 0 }, sidebar)
+	-- Sidebar: translucent black over the surface, a seam that fades down its right edge, the nav list, the footer.
+	local sidebar = create("Frame", { Position = UDim2.fromOffset(0, HEADER_HEIGHT + 1), Size = UDim2.new(0, SIDEBAR_WIDTH, 1, -(HEADER_HEIGHT + 1)), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.42, BorderSizePixel = 0, ClipsDescendants = true }, main)
+	local seam = create("Frame", { Position = UDim2.new(1, -1, 0, 0), Size = UDim2.new(0, 1, 1, 0), BackgroundColor3 = COLORS.accent, BorderSizePixel = 0 }, sidebar)
+	create("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.55), NumberSequenceKeypoint.new(0.55, 0.9), NumberSequenceKeypoint.new(1, 1) }), Rotation = 90 }, seam)
 
-	window.tabList = create("ScrollingFrame", { Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -21, 1, -70), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 0, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new() }, sidebar)
-	create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, window.tabList)
+	local navHolder = create("ScrollingFrame", { Position = UDim2.fromOffset(12, 14), Size = UDim2.new(1, -24, 1, -84), BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 2, ScrollBarImageColor3 = COLORS.lineStrong, ScrollBarImageTransparency = 0.4, ElasticBehavior = Enum.ElasticBehavior.Never }, sidebar)
 
-	local footer = create("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 10, 1, -12), Size = UDim2.new(1, -21, 0, 40), BackgroundTransparency = 1 }, sidebar)
-	create("UIListLayout", { VerticalAlignment = Enum.VerticalAlignment.Bottom }, footer)
+	-- The pill and the edge bar slide between tabs.
+	window.pill = create("Frame", { Size = UDim2.new(1, 0, 0, TAB_HEIGHT), BackgroundColor3 = COLORS.accent, BackgroundTransparency = 0.82, BorderSizePixel = 0, Visible = false }, navHolder)
+	corner(window.pill, RADIUS)
+	create("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) }) }, window.pill)
+	window.navHolder = navHolder
+	window.pillBar = create("Frame", { Size = UDim2.fromOffset(3, TAB_HEIGHT * 0.45), Position = UDim2.fromOffset(1, 0), BackgroundColor3 = COLORS.accent, BorderSizePixel = 0, Visible = false, ZIndex = 3 }, sidebar)
+	corner(window.pillBar, 999)
 
-	-- Page heading: serif title, mono subtitle.
-	local pageLeft = SIDEBAR_WIDTH + 30
-	window.pageTitle = label(main, "", 36, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(pageLeft, HEADER_HEIGHT + 16), Size = UDim2.new(1, -(pageLeft + 24), 0, 42), TextTruncate = Enum.TextTruncate.AtEnd })
-	window.pageSub = label(main, "", 10, COLORS.muted, MONO, { Position = UDim2.fromOffset(pageLeft + 2, HEADER_HEIGHT + 60), Size = UDim2.new(1, -(pageLeft + 24), 0, 14), TextTruncate = Enum.TextTruncate.AtEnd })
+	window.navList = create("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 }, navHolder)
+	create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, window.navList)
 
-	-- Pages.
-	window.pages = create("Frame", { Position = UDim2.fromOffset(pageLeft, HEADER_HEIGHT + 88), Size = UDim2.new(1, -(pageLeft + 18), 1, -(HEADER_HEIGHT + 100)), BackgroundTransparency = 1, ClipsDescendants = true }, main)
+	-- Footer: hairline, your avatar, your name and a state line.
+	local footer = create("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 12, 1, -14), Size = UDim2.new(1, -24, 0, 42), BackgroundTransparency = 1 }, sidebar)
+	create("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = COLORS.line, BackgroundTransparency = 0.4, BorderSizePixel = 0 }, footer)
+	local avatar = create("ImageLabel", { Position = UDim2.fromOffset(0, 13), Size = UDim2.fromOffset(28, 28), BackgroundColor3 = COLORS.card, BorderSizePixel = 0, Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=48&h=48", localPlayer.UserId) }, footer)
+	corner(avatar, 5)
+	stroke(avatar, 0.45, 1, COLORS.lineStrong)
+	label(footer, localPlayer.Name, 11, COLORS.dim, BOLD, { Position = UDim2.fromOffset(36, 13), Size = UDim2.new(1, -38, 0, 13), TextTruncate = Enum.TextTruncate.AtEnd })
+	window.footState = label(footer, "connected", 10, COLORS.faint, MONO, { Position = UDim2.fromOffset(36, 27), Size = UDim2.new(1, -38, 0, 12), TextTruncate = Enum.TextTruncate.AtEnd })
+
+	-- Content: page heading (serif title, dim subtitle) and the pages.
+	local contentLeft = SIDEBAR_WIDTH + 1 + PAGE_PADDING
+	window.pageTitle = label(main, "", 34, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(contentLeft, HEADER_HEIGHT + 25), Size = UDim2.new(1, -(contentLeft + PAGE_PADDING), 0, 36), TextTruncate = Enum.TextTruncate.AtEnd })
+	window.pageSub = label(main, "", 12, COLORS.dim, BODY, { Position = UDim2.fromOffset(contentLeft + 1, HEADER_HEIGHT + 64), Size = UDim2.new(1, -(contentLeft + PAGE_PADDING), 0, 16), TextTruncate = Enum.TextTruncate.AtEnd })
+	window.pages = create("Frame", { Position = UDim2.fromOffset(contentLeft, HEADER_HEIGHT + 96), Size = UDim2.new(1, -(contentLeft + PAGE_PADDING - 12), 1, -(HEADER_HEIGHT + 96 + 10)), BackgroundTransparency = 1, ClipsDescendants = true }, main)
 
 	-- Cover used for the open/close fade.
 	active.cover = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = COLORS.bg, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 30, Active = false }, main)
-	corner(active.cover, 10)
+	corner(active.cover, 12)
 
 	-- Floating widgets beside the window.
 	active.widgetHost = create("Frame", { Position = UDim2.fromOffset(WINDOW_WIDTH + WIDGET_GAP, 0), Size = UDim2.fromOffset(WIDGET_WIDTH, WINDOW_HEIGHT), BackgroundTransparency = 1, Visible = showWidgets }, body)
 	create("UIListLayout", { Padding = UDim.new(0, 12), SortOrder = Enum.SortOrder.LayoutOrder }, active.widgetHost)
 
 	-- Toasts live on their own host so they survive the window being hidden.
-	active.toastHost = create("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -20, 1, -20), Size = UDim2.fromOffset(320, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 }, gui)
+	active.toastHost = create("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -20, 1, -20), Size = UDim2.fromOffset(340, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 }, gui)
 	create("UIListLayout", { Padding = UDim.new(0, 8), VerticalAlignment = Enum.VerticalAlignment.Bottom, SortOrder = Enum.SortOrder.LayoutOrder }, active.toastHost)
+
+	-- Dock: a small pill that stands in for the window while it is hidden (the reference's "Minimise" action). Click to restore.
+	local dock = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Size = UDim2.fromOffset(132, 32), BackgroundColor3 = COLORS.card, BackgroundTransparency = 0.12, BorderSizePixel = 0, Visible = false }, gui)
+	corner(dock, 999)
+	stroke(dock, 0.45, 1, COLORS.line)
+	label(dock, string.upper(tostring(opts.Title or "Hub")), 15, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(16, 0), Size = UDim2.new(1, -32, 1, 0), TextXAlignment = Enum.TextXAlignment.Center })
+	track(dock.MouseEnter:Connect(function()
+		tween(dock, 0.2, { BackgroundTransparency = 0 })
+	end))
+	track(dock.MouseLeave:Connect(function()
+		tween(dock, 0.25, { BackgroundTransparency = 0.12 })
+	end))
+	track(dock.Activated:Connect(function()
+		window:Toggle(true)
+	end))
+	active.refreshDock = function()
+		local wanted = HussUI.Flags.ui_dock == nil or HussUI.Flags.ui_dock.Value == true
+		dock.Visible = wanted and not active.visible and not active.dockHidden
+	end
 
 	-- Keybind list: a small draggable panel that stays on screen while the menu is closed. It lists every enabled
 	-- feature with its key (and the disabled ones too when "List disabled features too" is on).
 	local listFrame = create("Frame", { Position = UDim2.new(0, 24, 0.38, 0), Size = UDim2.fromOffset(220, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = COLORS.bg, BackgroundTransparency = 0.06, BorderSizePixel = 0, Visible = false, Active = true, ClipsDescendants = true }, gui)
-	corner(listFrame, 8)
-	stroke(listFrame, 0.82)
+	corner(listFrame, 10)
+	stroke(listFrame, 0.45, 1, COLORS.line)
 	create("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14), PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 12) }, listFrame)
 	create("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, listFrame)
-	local listTitle = label(listFrame, "KEYBINDS", 10, COLORS.muted, MONO, { Size = UDim2.new(1, 0, 0, 20), LayoutOrder = 0, TextTruncate = Enum.TextTruncate.AtEnd })
+	local listTitle = label(listFrame, "KEYBINDS", 9, COLORS.faint, MONO, { Size = UDim2.new(1, 0, 0, 20), LayoutOrder = 0, TextTruncate = Enum.TextTruncate.AtEnd })
 	local listRows = {}
 
 	active.refreshKeyList = function()
@@ -1783,7 +2045,7 @@ function HussUI:CreateWindow(opts)
 
 			shown += 1
 			local holder = create("Frame", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, LayoutOrder = index }, listFrame)
-			local dot = create("Frame", { Size = UDim2.fromOffset(5, 5), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = on and COLORS.accent or COLORS.muted, BackgroundTransparency = on and 0 or 0.6, BorderSizePixel = 0 }, holder)
+			create("Frame", { Size = UDim2.fromOffset(5, 5), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), BackgroundColor3 = on and COLORS.accent or COLORS.muted, BackgroundTransparency = on and 0 or 0.6, BorderSizePixel = 0 }, holder)
 			label(holder, info.text, 12, on and COLORS.text or COLORS.muted, BODY, { Position = UDim2.fromOffset(14, 0), Size = UDim2.new(1, -66, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd })
 			label(holder, keyLabel(info.key()), 10, COLORS.accent2, MONO, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(50, 20), TextXAlignment = Enum.TextXAlignment.Right })
 			table.insert(listRows, holder)
@@ -1844,19 +2106,34 @@ function HussUI:CreateWindow(opts)
 		window:Toggle()
 	end))
 
-	-- Live refresh: stat cards, widgets and the wordmark shimmer.
+	-- Live refresh: stat cards, widgets, ping, shimmer and the animated icons.
 	local fps = 60
 	local statClock = 0
 	local widgetClock = 0
 	local shimmerClock = 0
+	local pingClock = 2
 	track(runService.Heartbeat:Connect(function(deltaTime)
 		fps = fps + ((1 / math.max(deltaTime, 1e-3)) - fps) * math.min(1, deltaTime * 4)
+		stepIcons(deltaTime)
 		if not active.visible then return end
 
 		shimmerClock = shimmerClock + deltaTime
 		if shimmerClock >= 1 / 20 then
 			shimmerClock = 0
-			shimmer.Color = chromeSequence(os.clock() * 0.22)
+			local phase = os.clock() * 0.22
+			shimmer.Color = chromeSequence(phase)
+			if filmShimmer then filmShimmer.Color = chromeSequence(phase + 0.5) end
+		end
+
+		pingClock = pingClock + deltaTime
+		if pingClock >= 2 then
+			pingClock = 0
+			local ping = -1
+			pcall(function()
+				ping = statsService.Network.ServerStatsItem["Data Ping"]:GetValue()
+			end)
+			pingLabel.Text = ping >= 0 and string.format("%d ms", math.floor(ping + 0.5)) or "offline"
+			tween(pingDot, 0.3, { BackgroundColor3 = (ping < 0 and COLORS.faint) or (ping < 120 and COLORS.good) or (ping < 260 and COLORS.warn) or COLORS.bad })
 		end
 
 		statClock = statClock + deltaTime
@@ -1904,9 +2181,11 @@ function HussUI:CreateWindow(opts)
 		end
 	end))
 
-	-- Built-in Settings tab, pinned to the sidebar footer so it is always last.
-	local settings = makeTab(window, "Settings", "settings", footer, 1)
-	settings.subtitle = "Interface, configs and session"
+	-- Built-in Settings tab, last in the nav under its own "System" heading.
+	window.order = window.order + 0
+	label(window.navList, spaced("System"), 9, COLORS.faint, BOLD, { Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 999998, TextYAlignment = Enum.TextYAlignment.Bottom, Position = UDim2.fromOffset(10, 0) }).Name = "Category"
+	local settings = makeTab(window, "Settings", "settings", 999999)
+	settings.subtitle = "Interface, sound, configs and session"
 	settings:AddSection("Interface")
 	settings:AddKeybind({
 		Text = "Toggle UI",
@@ -1941,6 +2220,29 @@ function HussUI:CreateWindow(opts)
 		end,
 	})
 	settings:AddToggle({
+		Text = "Dock: keep a small button on screen while the window is hidden (click it to bring the window back)",
+		Default = true,
+		Flag = "ui_dock",
+		NoList = true,
+		Bind = false,
+		Callback = function()
+			active.refreshDock()
+		end,
+	})
+	settings:AddSlider({
+		Text = "Interface size (100% fits your screen the way the reference does)",
+		Min = 60,
+		Max = 140,
+		Default = 100,
+		Increment = 5,
+		Suffix = "%",
+		Flag = "ui_scale",
+		Callback = function(value)
+			active.scaleMultiplier = value / 100
+			active.refit()
+		end,
+	})
+	settings:AddToggle({
 		Text = "Background blur",
 		NoList = true,
 		Bind = false,
@@ -1949,6 +2251,23 @@ function HussUI:CreateWindow(opts)
 		Callback = function(on)
 			if active.visible then tween(active.blur, 0.3, { Size = on and 12 or 0 }) end
 		end,
+	})
+	settings:AddSection("Sound")
+	settings:AddToggle({
+		Text = "Interface sounds",
+		Default = true,
+		Flag = "ui_sfx",
+		NoList = true,
+		Bind = false,
+	})
+	settings:AddSlider({
+		Text = "Interface sound volume",
+		Min = 0,
+		Max = 100,
+		Default = 55,
+		Increment = 5,
+		Suffix = "%",
+		Flag = "ui_sfxVolume",
 	})
 	settings:AddSection("Session")
 	settings:AddButton({
@@ -1961,7 +2280,6 @@ function HussUI:CreateWindow(opts)
 	})
 	buildConfigs(window, settings, (string.gsub(tostring(opts.Title or "HussUI"), "%s+", "")))
 
-	active.window = window
 	window.Settings = settings
 
 	-- The keybind list defaults to on; the initial toggle state does not run its callback, so show it here.
