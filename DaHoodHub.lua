@@ -16,7 +16,7 @@ local executorName = identifyexecutor and select(1, identifyexecutor()) or ""
 if string.find(string.lower(tostring(executorName)), "matcha", 1, true) then
 	local success, source = pcall(readfile, "DaHoodMatcha.lua")
 	if not (success and source) then
-		success, source = pcall(httpget, "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/DaHoodMatcha.lua")
+		success, source = pcall(httpget, "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/DaHoodMatcha.lua")
 	end
 	local chunk = success and source and loadstring(source)
 	if not chunk then
@@ -37,7 +37,7 @@ local DaHood = {}
 -- Constants.
 local PLACE_IDS = { 2788229376, 88976059384565 }
 local UI_FILE = "V18UI.lua"
-local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/V18UI.lua"
+local UI_URL = "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/V18UI.lua"
 local TARGET_PARTS = { "Head", "UpperTorso", "HumanoidRootPart", "Closest" }
 local ESP_FONT = 2
 

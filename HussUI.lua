@@ -267,7 +267,7 @@ end
 -- One small pack (assets/ui.pack + ui.json in the repo) is downloaded once and unpacked into the workspace. Everything that
 -- uses an asset works without it; sounds and animated icons simply appear once the pack is on disk.
 
-local ASSET_BASE = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/assets/"
+local ASSET_BASE = "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/assets/"
 local ASSET_FOLDER = "HussValley/assets"
 local ASSET_MARKER = ASSET_FOLDER .. "/hv_ready_r2"
 local assetIds = {}

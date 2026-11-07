@@ -14,7 +14,7 @@
 local Edits = {}
 
 -- Constants.
-local BASE_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/edits/"
+local BASE_URL = "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/edits/"
 local FOLDER = "HussValley/edits"
 local PREFS_FILE = "HussValley/edits.json"
 local CHUNK_BYTES = 1048576

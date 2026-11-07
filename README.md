@@ -4,13 +4,13 @@ Roblox executor scripts. Each one loads with a single loadstring.
 
 | Script | Game | Loadstring |
 |---|---|---|
-| Monkey Hub | Survive a Million Monkeys | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/MonkeyHub.lua"))()` |
-| RoWorld Hub | RoWorld [World PvP] | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/RoWorldHub.lua"))()` |
-| Huss Valley Hub | [BOSS] Huss Valley | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/HussValleyHub.lua"))()` |
-| Da Hood Hub | Da Hood | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/DaHoodHub.lua"))()` (Potassium) / `loadstring(httpget("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/DaHoodHub.lua"))()` (Matcha) |
+| Monkey Hub | Survive a Million Monkeys | `loadstring(game:HttpGet("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/MonkeyHub.lua"))()` |
+| RoWorld Hub | RoWorld [World PvP] | `loadstring(game:HttpGet("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/RoWorldHub.lua"))()` |
+| Huss Valley Hub | [BOSS] Huss Valley | `loadstring(game:HttpGet("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/HussValleyHub.lua"))()` |
+| Da Hood Hub | Da Hood | `loadstring(game:HttpGet("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/DaHoodHub.lua"))()` (Potassium) / `loadstring(httpget("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/DaHoodHub.lua"))()` (Matcha) |
 | HussUI + HussEdits (libraries) | Huss Valley hub | loaded automatically by the hub (`HussUI.lua`, `HussEdits.lua`) |
-| GlassUI (library) | any | `local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/GlassUI.lua"))()` |
-| ui.lua (library) | any | `local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/ui.lua"))()` |
+| GlassUI (library) | any | `local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/GlassUI.lua"))()` |
+| ui.lua (library) | any | `local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/ui.lua"))()` |
 
 ## Monkey Hub
 
@@ -81,7 +81,7 @@ Infinite ammo, rapid fire, hitboxes and godmode are client side or predictive: t
 Translucent "glass" UI library with a stepper intro, glowing animated border, beat-pulse equalizer, blur-style tab transitions and a dark/light theme. Same API shape as `ui.lua`, plus `OnDestroy` so a script can unload itself when its window is unloaded:
 
 ```lua
-local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/GlassUI.lua"))()
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/GlassUI.lua"))()
 local window = UI:CreateWindow({ Title = "My Hub", Subtitle = "game", ToggleKey = Enum.KeyCode.RightShift })
 local tab = window:CreateTab("Main")
 tab:AddToggle({ Text = "Example", Flag = "example", Callback = function(on) end })

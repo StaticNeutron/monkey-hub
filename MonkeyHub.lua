@@ -53,12 +53,12 @@ local LOBBY_PLACE_ID = 99409088950210
 local MATCH_PLACE_ID = 115317125060158
 
 local CONFIG = {
-	RAW_BASE = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/",
+	RAW_BASE = "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/",
 	UI_LIBRARY_FILE = "ui.lua",
 	SETTINGS_FILE = "MonkeyHub/settings/config.json",
 	INTRO_STAMP_FILE = "MonkeyHub/settings/intro.stamp",
 	INTRO_COOLDOWN = 180,
-	REEXEC_SOURCE = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/MonkeyHub.lua"))()',
+	REEXEC_SOURCE = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/MonkeyHub.lua"))()',
 	READY_TIMEOUT = 90,
 	TICK_RATE = 0.08,
 	BOSS_TICK_RATE = 0.03,

@@ -13,7 +13,7 @@ local virtualUser = game:GetService("VirtualUser")
 
 -- Constants.
 local CONFIG = {
-	RAW_BASE = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/",
+	RAW_BASE = "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/",
 	UI_FILE = "ui.lua",
 	DECISION_INTERVAL = 1.5,
 	SCAN_INTERVAL = 3,

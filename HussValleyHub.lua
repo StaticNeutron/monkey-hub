@@ -21,7 +21,7 @@ local HussValley = {}
 -- Constants.
 local PLACE_ID = 107535308163741
 local UI_FILE = "HussUI.lua"
-local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/HussUI.lua"
+local UI_URL = "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/HussUI.lua"
 -- Per-game values. Each one comes from the decompiled client config named next to it.
 local CONFIG = {
 	-- 0 = react on every frame; a dodge cannot afford to wait for a throttled tick.
@@ -3114,7 +3114,7 @@ function startup.run(edit)
 end
 
 function startup.begin()
-	startup.edits = startup.load("HussEdits.lua", "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/HussEdits.lua")
+	startup.edits = startup.load("HussEdits.lua", "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/HussEdits.lua")
 	local edits = startup.edits
 	if not edits then return end
 
