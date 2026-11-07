@@ -1212,7 +1212,7 @@ function Tab:AddFilm(spec)
 				return
 			end
 
-			local made, player = pcall(Edits.newPlayer, stageHost, edit, { volume = Edits.prefs.volume, name = "Film", ZIndex = 3 })
+			local made, player = pcall(Edits.newPlayer, stageHost, edit, { volume = math.min(Edits.prefs.volume, 1), name = "Film", ZIndex = 3, fit = true })
 			if not made then
 				setPrompt("COULD NOT PLAY", true)
 				return
@@ -1296,7 +1296,7 @@ function Tab:AddFilm(spec)
 
 	-- The list of edits.
 	local listTop = 168
-	local listHolder = create("Frame", { Position = UDim2.fromOffset(rightX, listTop), Size = UDim2.new(1, -rightX - 16, 1, -listTop - 12), BackgroundTransparency = 1 }, card)
+	local listHolder = create("ScrollingFrame", { Position = UDim2.fromOffset(rightX, listTop), Size = UDim2.new(1, -rightX - 16, 1, -listTop - 12), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2, ScrollBarImageColor3 = COLORS.lineStrong, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new() }, card)
 	create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, listHolder)
 	local listNotice = label(listHolder, "LOADING THE EDIT LIBRARY", 10, COLORS.muted, MONO, { Size = UDim2.new(1, 0, 0, 20) })
 
@@ -2089,6 +2089,293 @@ function Window:Flip()
 	end
 end
 
+-- The film window ------------------------------------------------------------------------------------------------------------
+-- The reference's edit feature: the header button opens a floating film window (draggable by its title, resizable from the
+-- corner) with a seek bar, pause / stop / next film, a volume slider and the clock. Every press of the header button moves on
+-- to the next film. The stage takes the edit's own shape, portrait or landscape.
+
+local FILM_MIN_WIDTH = 860
+local FILM_STAGE_MAX_WIDTH = 1040
+local FILM_STAGE_MAX_HEIGHT = 585
+local FILM_HEADER = 50
+local FILM_CONTROLS = 72
+local FILM_FILL = Color3.fromRGB(224, 220, 207)
+
+-- Closes the film window (and stops its sound), remembering where it was and how big.
+---@param immediate boolean?
+function Window:CloseFilm(immediate)
+	local film = active and active.film
+	if not film or film.closed then return end
+
+	film.closed = true
+	active.film = nil
+	active.filmLayout = { position = film.root.Position, scale = film.scaler.Scale }
+	for _, connection in film.connections do
+		connection:Disconnect()
+	end
+	if film.player then film.player:destroy() end
+
+	if immediate then
+		film.gui:Destroy()
+	else
+		tween(film.root, 0.2, { GroupTransparency = 1 })
+		task.delay(0.23, function()
+			film.gui:Destroy()
+		end)
+	end
+end
+
+-- Opens the next film (step = 1) or the previous one (step = -1).
+---@param step number?
+function Window:OpenFilm(step)
+	local Edits = active.edits
+	if not (Edits and Edits.manifest and #Edits.manifest.edits > 0) then
+		self:Notify({ Title = "Films unavailable", Text = "The edit library could not be reached.", Kind = "warn" })
+		return
+	end
+
+	local edits = Edits.manifest.edits
+	active.filmIndex = ((active.filmIndex or 0) + (step or 1) - 1) % #edits + 1
+	local edit = edits[active.filmIndex]
+	self:CloseFilm(true)
+
+	local aspect = edit.tileW / edit.tileH
+	local stageWidth = math.min(FILM_STAGE_MAX_HEIGHT * aspect, FILM_STAGE_MAX_WIDTH)
+	local stageHeight = stageWidth / aspect
+	local width = math.max(stageWidth, FILM_MIN_WIDTH)
+	local height = FILM_HEADER + stageHeight + FILM_CONTROLS
+	local bottom = FILM_HEADER + stageHeight
+
+	local film = { closed = false, connections = {}, volume = math.clamp(Edits.prefs.volume, 0, 2) }
+	active.film = film
+	local function hold(connection)
+		table.insert(film.connections, connection)
+		return connection
+	end
+
+	local gui = create("ScreenGui", { Name = "HussUI_Film", ResetOnSpawn = false, IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 1002 }, getGuiParent())
+	film.gui = gui
+
+	local function fitScale()
+		local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+		local automatic = math.clamp(math.min(viewport.X / (WINDOW_WIDTH + 40), viewport.Y / (WINDOW_HEIGHT + 50)), 0.5, 1.6)
+		return math.min(automatic, (viewport.X - 50) / width, (viewport.Y - 60) / height), viewport
+	end
+
+	local root = create("CanvasGroup", { Name = "FilmWindow", Size = UDim2.fromOffset(width, height), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = Color3.fromRGB(9, 9, 9), BorderSizePixel = 0, GroupTransparency = 1 }, gui)
+	film.root = root
+	corner(root, 7)
+	stroke(root, 0.45, 1, COLORS.lineStrong)
+	local initialScale = fitScale()
+	film.scaler = create("UIScale", { Scale = initialScale }, root)
+	if active.filmLayout then
+		root.Position = active.filmLayout.position
+		film.scaler.Scale = math.min(initialScale, active.filmLayout.scale)
+	end
+
+	label(root, string.format("HUSS VALLEY  /  FILM %02d  /  %s", active.filmIndex, string.upper(edit.title)), 14, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(24, 15), Size = UDim2.new(1, -140, 0, 26), TextTruncate = Enum.TextTruncate.AtEnd })
+
+	-- Keeps the window fully on screen and within the sizes that fit.
+	function film.setScale(value)
+		local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+		local upper = math.min((viewport.X - 32) / width, (viewport.Y - 40) / height)
+		film.scaler.Scale = math.clamp(value, math.min(0.5, upper), upper)
+
+		local size = Vector2.new(width * film.scaler.Scale, height * film.scaler.Scale)
+		local center = Vector2.new(root.Position.X.Scale * viewport.X + root.Position.X.Offset, root.Position.Y.Scale * viewport.Y + root.Position.Y.Offset)
+		root.Position = UDim2.fromOffset(
+			math.clamp(center.X, size.X / 2 + 8, math.max(size.X / 2 + 8, viewport.X - size.X / 2 - 8)),
+			math.clamp(center.Y, size.Y / 2 + 8, math.max(size.Y / 2 + 8, viewport.Y - size.Y / 2 - 8))
+		)
+	end
+
+	-- Dragging by the title strip.
+	local grip = create("TextButton", { Name = "Drag", Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, -76, 0, FILM_HEADER) }, root)
+	local drag
+	hold(grip.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			drag = { input = input, touch = input.UserInputType == Enum.UserInputType.Touch, start = Vector2.new(input.Position.X, input.Position.Y), position = root.Position }
+		end
+	end))
+
+	local stage = create("Frame", { Name = "Film", Position = UDim2.fromOffset((width - stageWidth) / 2, FILM_HEADER), Size = UDim2.fromOffset(stageWidth, stageHeight), BorderSizePixel = 0, BackgroundColor3 = Color3.new(0, 0, 0) }, root)
+	local prompt = label(stage, "OPENING", 11, COLORS.text, MONO, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, -20, 0, 20), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 5 })
+
+	-- Buttons in the reference's flat style.
+	local function filmButton(name, word, position, size, callback)
+		local button = create("TextButton", { Name = name, Text = word, Position = position, Size = size, BackgroundColor3 = Color3.fromRGB(31, 31, 29), BorderSizePixel = 0, TextColor3 = Color3.fromRGB(235, 233, 226), TextSize = 12, Font = BODY, AutoButtonColor = false }, root)
+		corner(button, 4)
+		hold(button.MouseEnter:Connect(function()
+			tween(button, 0.18, { BackgroundColor3 = Color3.fromRGB(48, 48, 44) })
+			active.sfx("hover")
+		end))
+		hold(button.MouseLeave:Connect(function()
+			tween(button, 0.18, { BackgroundColor3 = Color3.fromRGB(31, 31, 29) })
+		end))
+		hold(button.Activated:Connect(function()
+			active.sfx("click")
+			callback()
+		end))
+		return button
+	end
+
+	local pause = filmButton("Pause", "Pause", UDim2.fromOffset(24, bottom + 24), UDim2.fromOffset(80, 30), function()
+		local player = film.player
+		if not player then return end
+
+		if player.playing then
+			player:pause()
+		else
+			player:play()
+		end
+	end)
+	filmButton("Stop", "Stop", UDim2.fromOffset(116, bottom + 24), UDim2.fromOffset(70, 30), function()
+		if film.player then
+			film.player:pause()
+			film.player:seek(0)
+		end
+	end)
+	filmButton("Next", "Next film", UDim2.fromOffset(198, bottom + 24), UDim2.fromOffset(100, 30), function()
+		self:OpenFilm(1)
+	end)
+	filmButton("Close", "X", UDim2.new(1, -56, 0, 12), UDim2.fromOffset(32, 28), function()
+		self:CloseFilm()
+	end)
+
+	-- Volume: 0 to 200%.
+	label(root, "VOLUME", 10, COLORS.text, MONO, { Position = UDim2.fromOffset(330, bottom + 23), Size = UDim2.fromOffset(82, 30) })
+	local volumeTrack = create("TextButton", { Name = "Volume", Text = "", Position = UDim2.fromOffset(416, bottom + 24), Size = UDim2.fromOffset(186, 30), BackgroundTransparency = 1, AutoButtonColor = false }, root)
+	create("Frame", { Position = UDim2.new(0, 0, 0.5, -1), Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = Color3.fromRGB(58, 57, 51), BorderSizePixel = 0 }, volumeTrack)
+	local volumeFill = create("Frame", { Position = UDim2.new(0, 0, 0.5, -1), Size = UDim2.fromOffset(0, 2), BackgroundColor3 = FILM_FILL, BorderSizePixel = 0 }, volumeTrack)
+	local volumeKnob = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(8, 8), BackgroundColor3 = FILM_FILL, BorderSizePixel = 0 }, volumeTrack)
+	corner(volumeKnob, 4)
+	local volumeValue = label(root, "", 12, COLORS.text, MONO, { Position = UDim2.fromOffset(618, bottom + 24), Size = UDim2.fromOffset(60, 30) })
+
+	local saveToken = 0
+	local function setVolume(value, persist)
+		film.volume = math.clamp(tonumber(value) or 0.65, 0, 2)
+		if film.player then film.player:setVolume(film.volume) end
+		volumeFill.Size = UDim2.new(film.volume / 2, 0, 0, 2)
+		volumeKnob.Position = UDim2.fromScale(film.volume / 2, 0.5)
+		volumeValue.Text = string.format("%.0f%%", film.volume * 100)
+
+		if persist then
+			Edits.prefs.volume = film.volume
+			saveToken += 1
+			local token = saveToken
+			task.delay(0.5, function()
+				if token == saveToken then Edits.savePrefs() end
+			end)
+		end
+	end
+	film.setVolume = setVolume
+	setVolume(film.volume, false)
+
+	local volumeDrag
+	local function volumeAt(x)
+		setVolume((x - volumeTrack.AbsolutePosition.X) / math.max(1, volumeTrack.AbsoluteSize.X) * 2, true)
+	end
+	hold(volumeTrack.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			volumeDrag = input
+			volumeAt(input.Position.X)
+		end
+	end))
+
+	-- Resize: the corner mark scales the whole window.
+	local resize = create("TextButton", { Name = "Resize", Text = "/", Position = UDim2.new(1, -25, 1, -25), Size = UDim2.fromOffset(24, 24), BackgroundTransparency = 1, TextColor3 = Color3.fromRGB(235, 233, 226), TextSize = 20, Font = BODY, AutoButtonColor = false }, root)
+	local resizing
+	hold(resize.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			resizing = { input = input, start = Vector2.new(input.Position.X, input.Position.Y), scale = film.scaler.Scale }
+		end
+	end))
+
+	hold(userInputService.InputChanged:Connect(function(input)
+		if drag and (input == drag.input or (not drag.touch and input.UserInputType == Enum.UserInputType.MouseMovement)) then
+			local delta = Vector2.new(input.Position.X, input.Position.Y) - drag.start
+			root.Position = drag.position + UDim2.fromOffset(delta.X, delta.Y)
+		end
+		if volumeDrag and (input == volumeDrag or (volumeDrag.UserInputType ~= Enum.UserInputType.Touch and input.UserInputType == Enum.UserInputType.MouseMovement)) then
+			volumeAt(input.Position.X)
+		end
+		if resizing and (input == resizing.input or (resizing.input.UserInputType ~= Enum.UserInputType.Touch and input.UserInputType == Enum.UserInputType.MouseMovement)) then
+			local delta = Vector2.new(input.Position.X, input.Position.Y) - resizing.start
+			film.setScale(resizing.scale + 2 * (delta.X * width + delta.Y * height) / (width * width + height * height))
+		end
+	end))
+	hold(userInputService.InputEnded:Connect(function(input)
+		local released = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+		if drag and (input == drag.input or (not drag.touch and released)) then drag = nil end
+		if volumeDrag and (input == volumeDrag or (volumeDrag.UserInputType ~= Enum.UserInputType.Touch and released)) then volumeDrag = nil end
+		if resizing and (input == resizing.input or (resizing.input.UserInputType ~= Enum.UserInputType.Touch and released)) then resizing = nil end
+	end))
+	hold(userInputService.WindowFocusReleased:Connect(function()
+		drag, volumeDrag, resizing = nil, nil, nil
+	end))
+	film.setScale(film.scaler.Scale)
+
+	-- Clock and seek bar.
+	local clock = label(root, "", 12, COLORS.text, MONO, { Position = UDim2.new(1, -176, 0, bottom + 26), Size = UDim2.fromOffset(150, 25), TextXAlignment = Enum.TextXAlignment.Right })
+	local seek = create("TextButton", { Name = "Seek", Text = "", Position = UDim2.fromOffset(24, bottom + 8), Size = UDim2.new(1, -48, 0, 4), BackgroundColor3 = Color3.fromRGB(49, 49, 45), BorderSizePixel = 0, AutoButtonColor = false }, root)
+	local progress = create("Frame", { Name = "Progress", Size = UDim2.fromScale(0, 1), BackgroundColor3 = FILM_FILL, BorderSizePixel = 0 }, seek)
+	hold(seek.Activated:Connect(function()
+		if not film.player then return end
+
+		local fraction = math.clamp((userInputService:GetMouseLocation().X - seek.AbsolutePosition.X) / seek.AbsoluteSize.X, 0, 1)
+		film.player:seek(fraction * edit.duration)
+	end))
+
+	local accumulated = 0
+	local lastViewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+	hold(runService.Heartbeat:Connect(function(deltaTime)
+		accumulated += deltaTime
+		if accumulated < 0.1 then return end
+		accumulated = 0
+
+		local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+		if viewport ~= lastViewport then
+			lastViewport = viewport
+			film.setScale(film.scaler.Scale)
+		end
+
+		local player = film.player
+		local at = player and player.time or 0
+		clock.Text = string.format("%s / %s", Edits.clock(at), Edits.clock(edit.duration))
+		progress.Size = UDim2.fromScale(math.clamp(at / edit.duration, 0, 1), 1)
+		pause.Text = (player and player.playing) and "Pause" or "Play"
+	end))
+
+	active.sfx("open")
+	tween(root, 0.3, { GroupTransparency = 0 })
+
+	-- The edit is downloaded the first time, then it plays from disk.
+	task.spawn(function()
+		pcall(setthreadidentity, 8)
+		local installed, reason = Edits.install(edit, function(fraction)
+			if not film.closed then prompt.Text = string.format("FETCHING  %d%%", math.floor(fraction * 100)) end
+		end)
+		if film.closed then return end
+
+		if not installed then
+			prompt.Text = "COULD NOT LOAD  /  " .. string.upper(tostring(reason))
+			return
+		end
+
+		local made, player = pcall(Edits.newPlayer, stage, edit, { volume = film.volume, name = "Edit", fit = true })
+		if not made or film.closed then
+			if made then player:destroy() end
+			prompt.Text = "COULD NOT PLAY"
+			return
+		end
+
+		film.player = player
+		player:prepare(5)
+		prompt.Visible = false
+		player:play()
+	end)
+end
+
 -- Config manager shown in the built-in Settings tab (named JSON files under <Title>/configs).
 ---@param window table
 ---@param settings table
@@ -2212,7 +2499,7 @@ function HussUI:CreateWindow(opts)
 	shared.__HussUI = HussUI
 
 	local window = setmetatable({ tabs = {}, order = 0, toggleKey = opts.ToggleKey or Enum.KeyCode.RightShift }, Window)
-	active = { connections = {}, visible = false, capturing = false, onDestroy = opts.OnDestroy, widgets = {}, statCards = {}, listed = {}, icons = {}, sounds = {}, sfx = playSfx, scaleMultiplier = 1 }
+	active = { edits = opts.Edits, connections = {}, visible = false, capturing = false, onDestroy = opts.OnDestroy, widgets = {}, statCards = {}, listed = {}, icons = {}, sounds = {}, sfx = playSfx, scaleMultiplier = 1 }
 
 	local showWidgets = opts.Widgets == true
 
@@ -2325,7 +2612,7 @@ function HussUI:CreateWindow(opts)
 
 	-- The film shortcut: serif words with a shimmer and an underline that draws in on hover (the reference's "Giorgio Armani?").
 	local filmShimmer
-	if opts.FilmTab then
+	if opts.FilmTab or opts.Edits then
 		local films = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(0, 0), Position = UDim2.new(1, -455, 0.5, -17), Size = UDim2.fromOffset(182, 34), BackgroundTransparency = 1 }, header)
 		local word = label(films, opts.FilmLabel or "The edits", 21, COLORS.text, DISPLAY, { Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center })
 		filmShimmer = create("UIGradient", { Color = chromeSequence(0) }, word)
@@ -2340,7 +2627,11 @@ function HussUI:CreateWindow(opts)
 		end))
 		track(films.Activated:Connect(function()
 			active.sfx("click")
-			window:SelectTab(opts.FilmTab)
+			if active.edits then
+				window:OpenFilm(1)
+			elseif opts.FilmTab then
+				window:SelectTab(opts.FilmTab)
+			end
 		end))
 	end
 
@@ -2731,7 +3022,7 @@ function HussUI:Destroy()
 		pcall(function() connection:Disconnect() end)
 	end
 
-	for _, instance in { owner.gui, owner.introGui, owner.blur, owner.morphGui } do
+	for _, instance in { owner.gui, owner.introGui, owner.blur, owner.morphGui, owner.film and owner.film.gui } do
 		if instance then pcall(function() instance:Destroy() end) end
 	end
 

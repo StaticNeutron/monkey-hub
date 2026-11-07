@@ -80,7 +80,7 @@ function Edits.loadPrefs()
 
 	if type(data.play) == "boolean" then Edits.prefs.play = data.play end
 	if type(data.pick) == "string" then Edits.prefs.pick = data.pick end
-	if type(data.volume) == "number" then Edits.prefs.volume = math.clamp(data.volume, 0, 1) end
+	if type(data.volume) == "number" then Edits.prefs.volume = math.clamp(data.volume, 0, 2) end
 	return Edits.prefs
 end
 
@@ -325,7 +325,8 @@ function Edits.newPlayer(parent, edit, opts)
 	self.view.Name = "Picture"
 	self.view.Size = UDim2.fromScale(1, 1)
 	self.view.BackgroundTransparency = 1
-	self.view.ScaleType = Enum.ScaleType.Crop
+	-- Fit letterboxes an edit whose shape differs from the frame it is shown in; Crop fills a frame of the edit's own shape.
+	self.view.ScaleType = opts.fit and Enum.ScaleType.Fit or Enum.ScaleType.Crop
 	self.view.ImageRectSize = Vector2.new(edit.tileW - 2, edit.tileH - 2)
 	self.view.ZIndex = self.root.ZIndex
 	self.view.Parent = self.root
@@ -882,8 +883,14 @@ function Edits.prelude(opts)
 			end
 		elseif state.phase == "film" then
 			state.filmTime += deltaTime
+			-- Portrait edits are as tall as the stage allows, landscape ones as wide; neither may leave the screen.
+			local aspect = edit.tileW / edit.tileH
 			local height = math.min(viewport.Y * 0.66, 720)
-			local width = height * edit.tileW / edit.tileH
+			local width = height * aspect
+			if width > viewport.X * 0.8 or width > 1000 then
+				width = math.min(viewport.X * 0.8, 1000)
+				height = width / aspect
+			end
 			filmHost.Visible = true
 			filmHost.Size = UDim2.fromOffset(width, height)
 			filmHost.Position = UDim2.new(0.5, 0, 0.5, viewport.Y * 0.06)

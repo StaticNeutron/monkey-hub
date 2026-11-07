@@ -2782,6 +2782,8 @@ local function buildUi()
 		ToggleKey = Enum.KeyCode.RightShift,
 		-- The Edits tab is only offered when the edit library could be loaded; the window stays closed behind a running film.
 		FilmTab = (startup.edits and startup.edits.manifest) and "Edits" or nil,
+		-- With the edit library loaded, the header button opens the film window (and cycles through the films).
+		Edits = (startup.edits and startup.edits.manifest) and startup.edits or nil,
 		FilmLabel = "The edits",
 		StartHidden = startup.prelude ~= nil,
 		-- Pressing "Unload Script" in Settings unloads the whole script, not just the window.
