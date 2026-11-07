@@ -6,7 +6,9 @@
 -- attributes, a dash goes through ChickenOrHero.Movement.BoostInput, catches themselves are server-side.
 -- Movement tweaks retune the game's own movement profile (MovementProfiles.get), so cooldown, recovery, distance and
 -- speed all flow through the game's formulas; nothing is written into game memory.
--- UI: V18UI (V18UI.lua in the executor workspace, or the copy in the same GitHub repo), same look as the Da Hood hub.
+-- UI: HussUI (HussUI.lua in the executor workspace, or the copy in the same GitHub repo): near-black, ivory, serif "private
+-- edition" skin. Edits: HussEdits.lua downloads edit packs from the repo (edits/) and plays one as a film when the script
+-- starts (Space or Skip ends it); the Edits tab is a viewer and chooses which one plays at start.
 if not shared then return warn("No shared, no script.") end
 
 -- Singleton: replace a previous instance.
@@ -18,9 +20,8 @@ local HussValley = {}
 
 -- Constants.
 local PLACE_ID = 107535308163741
-local UI_FILE = "V18UI.lua"
-local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/V18UI.lua"
-
+local UI_FILE = "HussUI.lua"
+local UI_URL = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/HussUI.lua"
 -- Per-game values. Each one comes from the decompiled client config named next to it.
 local CONFIG = {
 	-- 0 = react on every frame; a dodge cannot afford to wait for a throttled tick.
@@ -110,6 +111,9 @@ local lastError = 0
 local alive = false
 local uiWindow = nil
 local detaching = false
+-- Start-up film state: the HussEdits module, the running film (nil when none) and the viewer handle. One table, because a
+-- script chunk may hold at most 200 locals.
+local startup = { edits = nil, prelude = nil, film = nil }
 local guardTripped = false
 local lastRunStateAt = -10
 local resetCharacter = nil
@@ -1848,19 +1852,19 @@ local function createHud()
 	frame.AutomaticSize = Enum.AutomaticSize.Y
 	frame.Size = UDim2.fromOffset(230, 0)
 	frame.Position = UDim2.new(1, -250, 0, 70)
-	frame.BackgroundColor3 = Color3.fromRGB(14, 17, 26)
-	frame.BackgroundTransparency = 0.12
+	frame.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+	frame.BackgroundTransparency = 0.1
 	frame.BorderSizePixel = 0
 	frame.Active = true
 	frame.Parent = gui
 
 	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 10)
+	corner.CornerRadius = UDim.new(0, 8)
 	corner.Parent = frame
 
 	local stroke = Instance.new("UIStroke")
-	stroke.Color = Color3.fromRGB(94, 234, 212)
-	stroke.Transparency = 0.45
+	stroke.Color = Color3.fromRGB(236, 232, 222)
+	stroke.Transparency = 0.8
 	stroke.Parent = frame
 
 	local padding = Instance.new("UIPadding")
@@ -1920,24 +1924,25 @@ local PANEL_WIDTH = 600
 local PANEL_HEIGHT = 470
 
 local PANEL_COLORS = {
-	bg = Color3.fromRGB(24, 19, 16),
-	card = Color3.fromRGB(34, 27, 23),
-	row = Color3.fromRGB(255, 244, 232),
-	text = Color3.fromRGB(248, 242, 236),
-	muted = Color3.fromRGB(182, 170, 158),
-	accent = Color3.fromRGB(70, 108, 226),
-	accent2 = Color3.fromRGB(122, 152, 244),
-	stroke = Color3.fromRGB(255, 240, 224),
+	bg = Color3.fromRGB(12, 12, 12),
+	card = Color3.fromRGB(22, 22, 21),
+	row = Color3.fromRGB(236, 232, 222),
+	text = Color3.fromRGB(236, 232, 222),
+	muted = Color3.fromRGB(152, 149, 139),
+	accent = Color3.fromRGB(236, 232, 222),
+	accent2 = Color3.fromRGB(190, 186, 176),
+	stroke = Color3.fromRGB(236, 232, 222),
+	dark = Color3.fromRGB(12, 12, 12),
 }
 
 local STATUS = {
-	boss = { label = "Boss fight", color = Color3.fromRGB(240, 96, 112) },
-	game = { label = "In game", color = Color3.fromRGB(96, 214, 150) },
-	intermission = { label = "Intermission", color = Color3.fromRGB(240, 190, 90) },
-	lobby = { label = "Lobby", color = Color3.fromRGB(122, 152, 244) },
-	starting = { label = "Starting", color = Color3.fromRGB(250, 160, 100) },
-	ending = { label = "Round ending", color = Color3.fromRGB(200, 140, 240) },
-	unknown = { label = "No status", color = Color3.fromRGB(182, 170, 158) },
+	boss = { label = "Boss fight", color = Color3.fromRGB(214, 112, 106) },
+	game = { label = "In game", color = Color3.fromRGB(150, 192, 150) },
+	intermission = { label = "Intermission", color = Color3.fromRGB(216, 184, 112) },
+	lobby = { label = "Lobby", color = Color3.fromRGB(170, 176, 200) },
+	starting = { label = "Starting", color = Color3.fromRGB(222, 164, 120) },
+	ending = { label = "Round ending", color = Color3.fromRGB(184, 156, 208) },
+	unknown = { label = "No status", color = Color3.fromRGB(152, 149, 139) },
 }
 local STATUS_ORDER = { "boss", "game", "starting", "intermission", "lobby", "ending", "unknown" }
 local STATUS_RANK = { boss = 1, game = 2, starting = 3, intermission = 4, lobby = 5, ending = 6, unknown = 7 }
@@ -2260,8 +2265,8 @@ local function sortedRows()
 end
 
 local function buildServerRow(index)
-	local frame = make("Frame", { Size = UDim2.new(1, -6, 0, 70), BackgroundColor3 = PANEL_COLORS.row, BackgroundTransparency = 0.93, BorderSizePixel = 0, LayoutOrder = index }, serverList)
-	make("UICorner", { CornerRadius = UDim.new(0, 10) }, frame)
+	local frame = make("Frame", { Size = UDim2.new(1, -6, 0, 70), BackgroundColor3 = PANEL_COLORS.row, BackgroundTransparency = 0.95, BorderSizePixel = 0, LayoutOrder = index }, serverList)
+	make("UICorner", { CornerRadius = UDim.new(0, 6) }, frame)
 	local accent = make("Frame", { Size = UDim2.new(0, 4, 1, -16), Position = UDim2.fromOffset(8, 8), BackgroundColor3 = PANEL_COLORS.muted, BorderSizePixel = 0 }, frame)
 	make("UICorner", { CornerRadius = UDim.new(0, 2) }, accent)
 
@@ -2282,12 +2287,12 @@ local function buildServerRow(index)
 		BackgroundColor3 = PANEL_COLORS.accent,
 		AutoButtonColor = false,
 		Text = "JOIN",
-		TextSize = 12,
-		Font = Enum.Font.GothamBold,
-		TextColor3 = PANEL_COLORS.text,
+		TextSize = 11,
+		Font = Enum.Font.Code,
+		TextColor3 = PANEL_COLORS.dark,
 		BorderSizePixel = 0,
 	}, frame)
-	make("UICorner", { CornerRadius = UDim.new(0, 8) }, entry.join)
+	make("UICorner", { CornerRadius = UDim.new(0, 4) }, entry.join)
 	entry.join.Activated:Connect(function()
 		if entry.row then joinServer(entry.row) end
 	end)
@@ -2302,7 +2307,7 @@ local function fillServerRow(entry, row)
 	local status = STATUS[row.status]
 	entry.row = row
 	entry.frame.Visible = true
-	entry.frame.BackgroundTransparency = row.current and 0.86 or 0.93
+	entry.frame.BackgroundTransparency = row.current and 0.88 or 0.95
 	entry.accent.BackgroundColor3 = status.color
 	entry.title.Text = (row.current and "YOUR SERVER  ·  " or "") .. row.region
 	entry.detail.Text = (row.phase ~= "" and row.phase ~= status.label) and (status.label .. "  ·  " .. row.phase) or status.label
@@ -2318,13 +2323,14 @@ local function fillServerRow(entry, row)
 	end
 	entry.king.Text = kingLine
 	entry.barFill.Size = UDim2.fromScale(kingFill, 1)
-	entry.barFill.BackgroundColor3 = kingFill >= 1 and Color3.fromRGB(240, 96, 112) or PANEL_COLORS.accent2
+	entry.barFill.BackgroundColor3 = kingFill >= 1 and Color3.fromRGB(214, 112, 106) or PANEL_COLORS.accent2
 
 	entry.players.Text = string.format("%d / %d players", row.players, row.capacity)
 	entry.ping.Text = row.ping and string.format("%d ms", row.ping) or "ping n/a"
 
 	local blocked = row.current or row.full
-	entry.join.BackgroundTransparency = blocked and 0.7 or 0.05
+	entry.join.BackgroundTransparency = blocked and 0.75 or 0
+	entry.join.TextColor3 = blocked and PANEL_COLORS.text or PANEL_COLORS.dark
 	entry.join.Text = row.current and "HERE" or (row.full and "FULL" or "JOIN")
 end
 
@@ -2360,8 +2366,8 @@ local function renderServers()
 
 	for key, chip in serverChips do
 		local active = key == "hideFull" and servers.hideFull or key == servers.filter
-		chip.BackgroundTransparency = active and 0.1 or 0.9
-		chip.TextColor3 = active and PANEL_COLORS.text or PANEL_COLORS.muted
+		chip.BackgroundTransparency = active and 0.05 or 0.93
+		chip.TextColor3 = active and PANEL_COLORS.dark or PANEL_COLORS.muted
 		if key ~= "all" and key ~= "hideFull" and counts[key] then chip.Text = string.format("%s  %d", STATUS[key].label, counts[key]) end
 	end
 
@@ -2389,16 +2395,16 @@ local function createServerGui()
 
 	serverGui = make("ScreenGui", { Name = "HussValleyServers", ResetOnSpawn = false, DisplayOrder = 1001, IgnoreGuiInset = true, Enabled = false }, nil)
 	serverRoot = make("Frame", { Name = "Root", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(PANEL_WIDTH, PANEL_HEIGHT), BackgroundColor3 = PANEL_COLORS.bg, BackgroundTransparency = 0, BorderSizePixel = 0, Active = true }, serverGui)
-	make("UICorner", { CornerRadius = UDim.new(0, 18) }, serverRoot)
-	make("UIStroke", { Color = PANEL_COLORS.stroke, Transparency = 0.88 }, serverRoot)
+	make("UICorner", { CornerRadius = UDim.new(0, 10) }, serverRoot)
+	make("UIStroke", { Color = PANEL_COLORS.stroke, Transparency = 0.84 }, serverRoot)
 
 	local header = make("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundTransparency = 1, Active = true }, serverRoot)
 	makeLabel(header, "Servers", 30, PANEL_COLORS.text, Enum.Font.Garamond, { Position = UDim2.fromOffset(20, 8), Size = UDim2.fromOffset(160, 36) })
 	serverCount = makeLabel(header, "", 12, PANEL_COLORS.muted, Enum.Font.GothamMedium, { Position = UDim2.fromOffset(150, 20), Size = UDim2.fromOffset(180, 18) })
 
 	local function headerButton(text, width, offset, callback)
-		local button = make("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, offset, 0, 13), Size = UDim2.fromOffset(width, 30), BackgroundColor3 = PANEL_COLORS.accent, BackgroundTransparency = 0.08, AutoButtonColor = false, Text = text, TextSize = 12, Font = Enum.Font.GothamBold, TextColor3 = PANEL_COLORS.text, BorderSizePixel = 0 }, header)
-		make("UICorner", { CornerRadius = UDim.new(0, 9) }, button)
+		local button = make("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, offset, 0, 13), Size = UDim2.fromOffset(width, 30), BackgroundColor3 = PANEL_COLORS.accent, BackgroundTransparency = 0, AutoButtonColor = false, Text = text, TextSize = 11, Font = Enum.Font.Code, TextColor3 = PANEL_COLORS.dark, BorderSizePixel = 0 }, header)
+		make("UICorner", { CornerRadius = UDim.new(0, 4) }, button)
 		button.Activated:Connect(callback)
 		return button
 	end
@@ -2410,8 +2416,8 @@ local function createServerGui()
 	local chips = make("Frame", { Position = UDim2.fromOffset(20, 84), Size = UDim2.new(1, -40, 0, 28), BackgroundTransparency = 1 }, serverRoot)
 	make("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, chips)
 	local function chip(key, text, width, order)
-		local button = make("TextButton", { Size = UDim2.fromOffset(width, 28), BackgroundColor3 = PANEL_COLORS.accent, BackgroundTransparency = 0.9, AutoButtonColor = false, Text = text, TextSize = 11, Font = Enum.Font.GothamBold, TextColor3 = PANEL_COLORS.muted, BorderSizePixel = 0, LayoutOrder = order }, chips)
-		make("UICorner", { CornerRadius = UDim.new(0, 8) }, button)
+		local button = make("TextButton", { Size = UDim2.fromOffset(width, 28), BackgroundColor3 = PANEL_COLORS.accent, BackgroundTransparency = 0.93, AutoButtonColor = false, Text = text, TextSize = 11, Font = Enum.Font.Code, TextColor3 = PANEL_COLORS.muted, BorderSizePixel = 0, LayoutOrder = order }, chips)
+		make("UICorner", { CornerRadius = UDim.new(0, 4) }, button)
 		button.Activated:Connect(function()
 			if key == "hideFull" then
 				servers.hideFull = not servers.hideFull
@@ -2584,19 +2590,30 @@ local function setupAntiAfk()
 	end))
 end
 
--- Local V18UI.lua first, the public copy as fallback.
----@return table
-local function loadLibrary()
+-- A library file from the workspace first, the public copy as fallback.
+---@param file string
+---@param url string
+---@return table?
+function startup.load(file, url)
 	local success, library = pcall(function()
-		local chunk = loadstring(readfile(UI_FILE))
+		local chunk = loadstring(readfile(file))
 		return chunk and chunk()
 	end)
-	if success and type(library) == "table" and library.CreateWindow then return library end
+	if success and type(library) == "table" then return library end
 
-	local response = request({ Url = UI_URL, Method = "GET" })
-	local chunk = loadstring(response.Body)
-	assert(chunk, "V18UI failed to compile")
-	return chunk()
+	local fetched, response = pcall(request, { Url = url, Method = "GET" })
+	local chunk = fetched and response and response.Success and loadstring(response.Body)
+	if not chunk then return nil end
+
+	local ran, loaded = pcall(chunk)
+	return ran and type(loaded) == "table" and loaded or nil
+end
+
+---@return table
+local function loadLibrary()
+	local library = startup.load(UI_FILE, UI_URL)
+	assert(library and library.CreateWindow, "HussUI failed to load")
+	return library
 end
 
 local CONFIG_FOLDER = "HussValley/configs"
@@ -2670,6 +2687,34 @@ local function farSafeZone(position)
 	return toA > toB and sideA or sideB
 end
 
+-- Highest solid surface straight below a point (nothing of ours, no other player, no non-collidable trigger boxes).
+---@param origin Vector3
+---@param depth number
+---@param ignoredInstances table
+---@param map Instance? only surfaces inside this model count (skips local effects and decoys that float around)
+---@return Vector3?
+local function groundBelow(origin, depth, ignoredInstances, map)
+	local ignored = table.clone(ignoredInstances)
+	for _, other in playersService:GetPlayers() do
+		if other.Character then table.insert(ignored, other.Character) end
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.RespectCanCollide = true
+
+	-- A few casts at most: every surface that is not part of the map is added to the filter and the ray is repeated.
+	for _ = 1, 6 do
+		params.FilterDescendantsInstances = ignored
+		local result = workspace:Raycast(origin, Vector3.new(0, -depth, 0), params)
+		if not result then return nil end
+		if not map or result.Instance:IsDescendantOf(map) then return result.Position end
+
+		table.insert(ignored, result.Instance)
+	end
+	return nil
+end
+
 -- Moves the character into the safe zone on the other side of the field.
 local function teleportAcross()
 	if os.clock() - lastTeleportAt < 1 then return end
@@ -2688,15 +2733,36 @@ local function teleportAcross()
 	local zone = farSafeZone(root.Position)
 	if not zone then return teleportNotify("No safe zone found on this map") end
 
-	-- Land inside the box at floor level, keeping the current spot along the field's width.
+	-- Land inside the box, keeping the current spot along the field's width.
 	local halfWidth = zone.Size.X / 2 - 4
 	local x = math.clamp(root.Position.X, zone.Position.X - halfWidth, zone.Position.X + halfWidth)
-	local landing = Vector3.new(x, zone.Position.Y - zone.Size.Y / 2 + 3.5, zone.Position.Z)
+
+	-- Stand on the real floor: the safe-zone box is invisible and its bottom edge is not the ground, so a fixed offset
+	-- from the box leaves the character hovering. Ray down from the box's top, ignoring everything non-solid.
+	-- The map is the top-level object (folder or model) the zone sits in.
+	local map = zone
+	while map.Parent and map.Parent ~= workspace do
+		map = map.Parent
+	end
+	local ground = groundBelow(Vector3.new(x, zone.Position.Y + zone.Size.Y / 2, zone.Position.Z), zone.Size.Y + 120, { character, zone }, map)
+
+	-- How far the root sits above the floor while standing: measured under the character when it is on the ground, else
+	-- the usual value for this rig (the humanoid's HipHeight alone does not include the legs).
+	local standHeight = 3
+	if humanoid.FloorMaterial ~= Enum.Material.Air then
+		local here = groundBelow(root.Position, 12, { character }, map)
+		if here then standHeight = math.clamp(root.Position.Y - here.Y, 1.5, 6) end
+	end
+	local landingY = ground and (ground.Y + standHeight + 0.05) or (zone.Position.Y - zone.Size.Y / 2 + standHeight)
+	local landing = Vector3.new(x, landingY, zone.Position.Z)
 
 	lastTeleportAt = os.clock()
 	character:PivotTo(CFrame.new(landing) * (root.CFrame - root.CFrame.Position))
+	-- No leftover motion from before the jump: it would carry the character up or sideways after the move.
 	root.AssemblyLinearVelocity = Vector3.zero
-	log("teleport to", landing)
+	root.AssemblyAngularVelocity = Vector3.zero
+	humanoid:ChangeState(Enum.HumanoidStateType.Landed)
+	log("teleport to", landing, ground and "ground found" or "no ground, used the box")
 
 	-- The server decides where we really are: if it moved us back, say so instead of pretending it worked.
 	task.delay(1.2, function()
@@ -2709,10 +2775,15 @@ end
 
 local function buildUi()
 	ui = loadLibrary()
+	local edits = startup.edits
 	local window = ui:CreateWindow({
 		Title = "Huss Valley",
 		Subtitle = "Dodge  /  Movement  /  Servers",
 		ToggleKey = Enum.KeyCode.RightShift,
+		-- The Edits tab is only offered when the edit library could be loaded; the window stays closed behind a running film.
+		FilmTab = (startup.edits and startup.edits.manifest) and "Edits" or nil,
+		FilmLabel = "The edits",
+		StartHidden = startup.prelude ~= nil,
 		-- Pressing "Unload Script" in Settings unloads the whole script, not just the window.
 		OnDestroy = function()
 			if not detaching then HussValley.detach() end
@@ -2901,19 +2972,89 @@ local function buildUi()
 	visuals:AddToggle({ Text = "Also show the rings of features that are switched off", Default = false, Flag = "radiusPreview", NoList = true })
 	visuals:AddLabel("Blue = Auto Dodge / Immortal scan range. Red = how far an attack reaches. Yellow = Immortal's close-lock trigger (or React to tracking). Orange = Proximity dodge. Green = Auto Tackle range. Purple = catcher Auto Ability range.")
 
-	-- Misc --------------------------------------------------------------------------------------------------------
+	-- Edits -------------------------------------------------------------------------------------------------------
+	if edits and edits.manifest then
+		window:CreateCategory("Edits")
+		local editsTab = window:CreateTab("Edits", "film", "Start-up films and the viewer")
+		startup.film = editsTab:AddFilm({
+			Edits = edits,
+			OnUse = function(edit)
+				edits.prefs.pick = edit.title
+				edits.savePrefs()
+				if ui.Flags.editPick then pcall(ui.Flags.editPick.Set, edit.title) end
+				window:Notify({ Title = "Start-up edit", Text = edit.title .. " plays when the script starts", Kind = "ok" })
+			end,
+		})
+
+		local titles = { "Random" }
+		for _, edit in edits.manifest.edits do
+			table.insert(titles, edit.title)
+		end
+
+		editsTab:AddSection("Start-up")
+		editsTab:AddToggle({
+			Text = "Play an edit when the script starts",
+			Default = edits.prefs.play,
+			Flag = "editsOnStart",
+			NoList = true,
+			Bind = false,
+			Callback = function(on)
+				edits.prefs.play = on
+				edits.savePrefs()
+			end,
+		})
+		editsTab:AddDropdown({
+			Text = "Edit to play at start",
+			Options = titles,
+			Default = table.find(titles, edits.prefs.pick) and edits.prefs.pick or "Random",
+			Flag = "editPick",
+			Callback = function(value)
+				edits.prefs.pick = value
+				edits.savePrefs()
+			end,
+		})
+		local volumeToken = 0
+		editsTab:AddSlider({
+			Text = "Edit volume",
+			Min = 0,
+			Max = 100,
+			Default = math.floor(edits.prefs.volume * 100 + 0.5),
+			Increment = 5,
+			Suffix = "%",
+			Flag = "editVolume",
+			Callback = function(value)
+				edits.prefs.volume = value / 100
+				if startup.film then startup.film.setVolume(value / 100) end
+
+				-- One write when the slider settles, not one per step of the drag.
+				volumeToken += 1
+				local token = volumeToken
+				task.delay(0.5, function()
+					if token == volumeToken then edits.savePrefs() end
+				end)
+			end,
+		})
+		editsTab:AddButton({ Text = "Play the start-up film now", Callback = function()
+			if startup.film then startup.film.pause() end
+			startup.run(edits.pickStart())
+		end })
+		editsTab:AddLabel("An edit is downloaded from GitHub the first time it plays and kept in the workspace (HussValley/edits), so it opens at once afterwards. The start-up choices above are remembered on their own, without saving a config. Space or the Skip button ends the film.")
+	end
+
+	-- Misc ----------------------------------------------------------------------------------------------------------
+		-- Misc --------------------------------------------------------------------------------------------------------
 	window:CreateCategory("Misc")
 	local misc = window:CreateTab("Misc", "sliders-horizontal", "Utilities")
 	misc:AddSection("Session")
 	misc:AddToggle({ Text = "Anti-AFK", Default = true, Flag = "antiAfk", NoList = true })
-	-- The V18UI keybind list (Insert) replaces the old panel; keep the old one available but off by default.
+	-- The HussUI keybind list (Insert) replaces the old panel; keep the old one available but off by default.
 	misc:AddToggle({ Text = "Old keybind HUD (draggable panel)", Default = false, Flag = "hud", NoList = true })
 	misc:AddKeybind({ Text = "Old HUD show/hide key", Default = Enum.KeyCode.J, Flag = "hudKey", Pressed = function()
 		local entry = ui.Flags.hud
 		if entry then entry.Set(not entry.Value) end
 	end })
 
-	-- Saving and loading configs is built into V18UI's Settings tab (HussValley/configs/<name>.json).
+	-- Saving and loading configs is built into HussUI's Settings tab (HussValley/configs/<name>.json).
 	local settingsTab = window.Settings or misc
 	settingsTab:AddSection("Start-up")
 	settingsTab:AddToggle({
@@ -2943,6 +3084,47 @@ local function buildUi()
 
 	createServerGui()
 	window:Notify({ Title = "Huss Valley", Text = "Loaded. RightShift toggles the menu, K opens the server browser.", Duration = 5 })
+end
+
+-- Start-up film -------------------------------------------------------------------------------------------------------------
+-- An edit plays fullscreen (HussEdits.prelude). The hub keeps loading behind it and the window opens when the film ends.
+-- Any failure (no network, no file access) just skips the film.
+
+-- Plays one edit now. The window steps aside while it runs.
+---@param edit table?
+function startup.run(edit)
+	local edits = startup.edits
+	if not edits or startup.prelude or detaching or not edit then return end
+
+	-- Marked busy before the film exists, so nothing can start a second one.
+	startup.prelude = { done = false, close = function() end }
+	if uiWindow then uiWindow:Toggle(false) end
+
+	local handle = edits.prelude({
+		parent = resolveGuiParent(),
+		edit = edit,
+		volume = edits.prefs.volume,
+		onDone = function()
+			startup.prelude = nil
+			if uiWindow and not detaching then uiWindow:Toggle(true) end
+		end,
+	})
+	-- A film that could not even start has already finished by the time prelude() returns.
+	if startup.prelude then startup.prelude = (not handle.done) and handle or nil end
+end
+
+function startup.begin()
+	startup.edits = startup.load("HussEdits.lua", "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/HussEdits.lua")
+	local edits = startup.edits
+	if not edits then return end
+
+	edits.loadPrefs()
+	if not edits.supported() then return end
+
+	local manifest = edits.getManifest()
+	if not manifest or not edits.prefs.play then return end
+
+	startup.run(edits.pickStart())
 end
 
 function HussValley.init()
@@ -3093,6 +3275,7 @@ function HussValley.detach()
 	for character in abilityVisuals do dropAbilityVisual(character) end
 	clearRings(nil)
 
+	if startup.prelude and not startup.prelude.done then pcall(startup.prelude.close) end
 	if hudGui then pcall(function() hudGui:Destroy() end) end
 	if serverGui then pcall(function() serverGui:Destroy() end) end
 	hudGui, hudLabel, keybindLabel = nil, nil, nil
@@ -3120,6 +3303,15 @@ HussValley.debug = {
 }
 
 shared.HussValley = HussValley
-xpcall(HussValley.init, onError)
+xpcall(function()
+	-- The film starts first and does not hold the loading up.
+	if game.PlaceId == PLACE_ID then
+		local started, failure = pcall(startup.begin)
+		if not started then warn("[HV] start-up film skipped:", failure) end
+	end
+	if detaching then return end
+
+	HussValley.init()
+end, onError)
 
 return HussValley

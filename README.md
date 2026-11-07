@@ -8,6 +8,7 @@ Roblox executor scripts. Each one loads with a single loadstring.
 | RoWorld Hub | RoWorld [World PvP] | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/RoWorldHub.lua"))()` |
 | Huss Valley Hub | [BOSS] Huss Valley | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/HussValleyHub.lua"))()` |
 | Da Hood Hub | Da Hood | `loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/DaHoodHub.lua"))()` (Potassium) / `loadstring(httpget("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/DaHoodHub.lua"))()` (Matcha) |
+| HussUI + HussEdits (libraries) | Huss Valley hub | loaded automatically by the hub (`HussUI.lua`, `HussEdits.lua`) |
 | GlassUI (library) | any | `local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/GlassUI.lua"))()` |
 | ui.lua (library) | any | `local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/ui.lua"))()` |
 
@@ -24,7 +25,9 @@ Script hub for **Survive a Million Monkeys** with a premium UI (hypercar intro, 
 
 Auto Dodge (dashes out of catcher swings and tackles through the game's own dash), Auto Ability (Q), Immortal (best effort), Movement tweaks, Threat ESP and Anti-AFK.
 
-**Immortal** watches every attack within about 45 studs, from any side and any number at once (melee swings, tackle dives, and a locked-on catcher that is about to swing). It picks the landing spot that is outside all of their hit zones, accounting for walls and the game's dash turn rule, and dashes there. While it is on it also forces **no dash cooldown**, **no recovery**, **full-distance dashes even from a standstill**, and the fastest dash the server accepted in testing (about 0.04 s), so it can dash again the instant the next attack lands. Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow. Two toggles under it: "Immortal: no cooldown + fastest dash" (turn it off to keep the dodging with the normal dash) and "Immortal: also use abilities (Q)" (turn it off to make Immortal dash only). **RightShift** opens and closes the menu. The window is built with `GlassUI` (loaded from `glassui.lua` in your executor workspace if present, otherwise downloaded from this repo), and "Unload Script" in its Settings tab unloads the whole script.
+**Immortal** watches every attack within about 45 studs, from any side and any number at once (melee swings, tackle dives, and a locked-on catcher that is about to swing). It picks the landing spot that is outside all of their hit zones, accounting for walls and the game's dash turn rule, and dashes there. While it is on it also forces **no dash cooldown**, **no recovery**, **full-distance dashes even from a standstill**, and the fastest dash the server accepted in testing (about 0.04 s), so it can dash again the instant the next attack lands. Catches are decided by the server, so this cannot be true god mode, and a very high ping can still be too slow. Two toggles under it: "Immortal: no cooldown + fastest dash" (turn it off to keep the dodging with the normal dash) and "Immortal: also use abilities (Q)" (turn it off to make Immortal dash only). **RightShift** opens and closes the menu. The window is built with `HussUI` (loaded from `HussUI.lua` in your executor workspace if present, otherwise downloaded from this repo), and "Unload Script" in its Settings tab unloads the whole script.
+
+**Edits** (new look and start-up film): the whole interface is a near-black, ivory, serif "private edition" skin. When the script starts it plays one of five edits fullscreen (Space or the Skip button ends it; the hub keeps loading behind it and the window opens afterwards). The **Edits** tab is a viewer with play/pause, previous/next, a timeline and the list of edits, plus "Use at start", "Play an edit when the script starts", "Edit to play at start" (Random or one by name), the volume and "Play the start-up film now". The choices are remembered in `HussValley/edits.json` without saving a config. Potassium's `VideoFrame` cannot load local video, so each edit is stored in `edits/` as a `.pack` (JPEG pages of 6 frames each plus an mp3) and `HussEdits.lua` downloads one the first time it plays (4 to 11 MB) into `HussValley/edits/`, then plays it from disk.
 
 **Configs** (Settings tab): pick a slot (Config 1 to 5) and Save, Load or Delete it. A config stores every switch, slider, dropdown and keybind in `HussValley/configs/` in your executor workspace. "Load this config when the script starts" restores the chosen slot every time you run the script.
 
@@ -87,6 +90,7 @@ tab:AddToggle({ Text = "Example", Flag = "example", Callback = function(on) end 
 ## Files
 
 - `MonkeyHub.lua`, `RoWorldHub.lua`, `HussValleyHub.lua`, `DaHoodHub.lua`, `DaHoodMatcha.lua` - the hubs.
-- `ui.lua`, `GlassUI.lua`, `V18UI.lua` - UI libraries.
+- `ui.lua`, `GlassUI.lua`, `V18UI.lua`, `HussUI.lua` - UI libraries (`HussUI.lua` is the Huss Valley hub's skin, with the film viewer).
+- `HussEdits.lua` - downloads and plays the edits; `edits/` holds `manifest.json`, `thumbs.jpg` and one `.pack` per edit.
 
 Game API details can change with game updates.
