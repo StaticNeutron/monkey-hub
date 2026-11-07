@@ -63,6 +63,7 @@ local BOLD = Enum.Font.GothamMedium
 local STRONG = Enum.Font.GothamBold
 local DISPLAY = Enum.Font.Garamond
 local MONO = Enum.Font.Code
+local MORPH_NAME = "HussUI_Morph"
 
 -- Services.
 local playersService = game:GetService("Players")
@@ -268,7 +269,7 @@ end
 
 local ASSET_BASE = "https://raw.githubusercontent.com/primelyn123-jpg/monkey-hub/main/assets/"
 local ASSET_FOLDER = "HussValley/assets"
-local ASSET_MARKER = ASSET_FOLDER .. "/hv_ready_r1"
+local ASSET_MARKER = ASSET_FOLDER .. "/hv_ready_r2"
 local assetIds = {}
 local assetsState = "idle"
 
@@ -1758,62 +1759,333 @@ function Window:IsOpen()
 	return active ~= nil and active.visible
 end
 
--- Opens or closes the window with a pop + fade and the background blur. `byButton` (the X) hides the dock too.
----@param state boolean?
----@param quiet boolean?
-function Window:Toggle(state, quiet)
-	if state == nil then state = not active.visible end
-	if state == active.visible then return end
+-- Dock and minimise ------------------------------------------------------------------------------------------------------
+-- The dock is a small pill that parks above the screen and slides to the top centre. Minimising does not shrink the window:
+-- it is redrawn as a ring of dots that turns into a circle, folds into an infinity sign, spins down and flies into the pill,
+-- which only fades in as the dots land (the reference's "genie"). Clicking the pill cancels anything still moving and
+-- brings the window back with the opening animation.
 
-	active.visible = state
+local DOCK_WIDTH, DOCK_HEIGHT = 142, 36
+local DOCK_IN_Y, DOCK_OUT_Y = 18, -60
+local MORPH_SEGMENTS = 60
+-- One long sweep with no bounce (a critically damped spring): it has settled by about 0.95 s.
+local MORPH_OMEGA = 7.8
+local MORPH_SECONDS = 1.07
+-- The bloom around the morph is capped against the shorter screen side, and fainter the larger it gets.
+local MORPH_GLOW_CAP = 0.62
+local MORPH_GLOW_REF = 620
+
+-- 0..1 with eased ends over a slice of the timeline.
+---@param p number
+---@param from number
+---@param to number
+---@return number
+local function ramp(p, from, to)
+	if to <= from then return p >= to and 1 or 0 end
+
+	local t = math.clamp((p - from) / (to - from), 0, 1)
+	return t * t * (3 - 2 * t)
+end
+
+-- Where the dock sits: on screen at the top centre, or parked above it. Sizes follow the window's own scale.
+---@param shown boolean
+---@return UDim2
+local function dockPosition(shown)
+	return UDim2.new(0.5, 0, 0, (shown and DOCK_IN_Y or DOCK_OUT_Y) * active.dockScale.Scale)
+end
+
+-- Everything the dock draws, at its resting opacity times alpha (0 = gone, 1 = fully there).
+---@param alpha number
+local function setDockAlpha(alpha)
+	active.dockAlpha = alpha
+	active.dock.BackgroundTransparency = 1 - alpha
+	active.dockStroke.Transparency = 1 - (1 - active.dockStrokeBase) * alpha
+	active.dockLabel.TextTransparency = 1 - alpha
+	active.dockMark.TextTransparency = 1 - alpha
+end
+
+---@param shown boolean
+local function moveDock(shown)
+	active.dockShown = shown
+	tween(active.dock, 0.3, { Position = dockPosition(shown) })
+end
+
+-- Stops a morph that has not finished (restoring while it runs is an explicit "stop that").
+local function cancelMorph()
+	if not active then return end
+
+	active.morphToken += 1
+	active.morphBusy = false
+	if active.morphConnection then
+		active.morphConnection:Disconnect()
+		active.morphConnection = nil
+	end
+	if active.morphGui then
+		pcall(function() active.morphGui:Destroy() end)
+		active.morphGui = nil
+	end
+end
+
+-- The dock's own life: its halo breathes and the mark's halo drifts around the monogram (only while it is on screen).
+---@param deltaTime number
+local function stepDock(deltaTime)
+	if not active or not active.dock then return end
+
+	if not active.glowReady then
+		local id = assetId("images/glow.png")
+		if id then
+			active.dockGlow.Image = id
+			active.orbGlow.Image = id
+			active.glowReady = true
+		end
+	end
+
+	if not active.glowReady or not (active.dockShown or active.morphBusy) then return end
+
+	active.dockTime += deltaTime
+	local t = active.dockTime
+	local hovered = active.dockHovered
+	local pulse = 0.5 + 0.5 * math.cos(t * 2.1)
+	local low, high = hovered and 0.52 or 0.74, hovered and 0.72 or 0.9
+	active.dockGlow.ImageTransparency = 1 - (1 - (high - (high - low) * pulse)) * active.dockAlpha
+
+	local angle = t * 0.75
+	active.orbGlow.Position = UDim2.fromOffset(22 + math.cos(angle) * 2.6, 18 + math.sin(angle * 1.3) * 2.2)
+	local second = 0.5 + 0.5 * math.cos(t * 1.55 + 1.1)
+	active.orbGlow.ImageTransparency = 1 - (1 - ((hovered and 0.5 or 0.66) + 0.16 * second)) * active.dockAlpha
+end
+
+-- The morph itself: a ring of dots on screen, in raw screen pixels, over everything.
+---@param onProgress function
+---@param onDone function
+local function runMorph(onProgress, onDone)
+	local main = active.main
+	local rect = { x = main.AbsolutePosition.X, y = main.AbsolutePosition.Y, w = main.AbsoluteSize.X, h = main.AbsoluteSize.Y }
+	local token = active.morphToken
+	if rect.w < 4 then
+		onDone()
+		return
+	end
+
+	local gui = create("ScreenGui", { Name = MORPH_NAME, ResetOnSpawn = false, IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 1001 }, getGuiParent())
+	active.morphGui = gui
+
+	-- Where the gui's own origin is on screen (the inset can differ), measured once.
+	local probe = create("Frame", { Size = UDim2.fromOffset(1, 1), BackgroundTransparency = 1 }, gui)
+	runService.Heartbeat:Wait()
+	if not active or active.morphToken ~= token or not gui.Parent then return end
+
+	local origin = probe.AbsolutePosition
+	probe:Destroy()
+
+	local dock = active.dock
+	local targetX = dock.AbsolutePosition.X + dock.AbsoluteSize.X / 2
+	local targetY = dock.AbsolutePosition.Y + dock.AbsoluteSize.Y / 2
+
+	local glowId = assetId("images/glow.png")
+	local glow = glowId and create("ImageLabel", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(rect.w, rect.h), BackgroundTransparency = 1, Image = glowId, ImageColor3 = COLORS.accent, ImageTransparency = 0.86, ZIndex = 1 }, gui)
+
+	local dotSize = math.max(3, math.floor(rect.h / 150))
+	local dots = {}
+	for index = 1, MORPH_SEGMENTS do
+		local dot = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(dotSize, dotSize), BackgroundColor3 = COLORS.text, BorderSizePixel = 0, ZIndex = 3 }, gui)
+		corner(dot, 999)
+		dots[index] = dot
+	end
+
+	local halfWidth, halfHeight = rect.w / 2, rect.h / 2
+	local circleRadius = math.min(rect.w, rect.h) * 0.30
+	local startX, startY = rect.x + halfWidth, rect.y + halfHeight
+
+	local clock = 0
+	local connection
+	connection = runService.RenderStepped:Connect(function(deltaTime)
+		if not gui.Parent then
+			connection:Disconnect()
+			return
+		end
+
+		clock += deltaTime
+		local p = math.clamp(1 - (1 + MORPH_OMEGA * clock) * math.exp(-MORPH_OMEGA * clock), 0, 1)
+		onProgress(p)
+
+		local toCircle = ramp(p, 0, 0.42)
+		local toInfinity = ramp(p, 0.3, 0.72)
+		local away = ramp(p, 0.62, 1)
+		local fade = ramp(p, 0.8, 1)
+
+		local scale = 1 - 0.86 * away
+		local centerX = startX + (targetX - startX) * away
+		local centerY = startY + (targetY - startY) * away
+		local rotation = p * 2.6
+		local cosR, sinR = math.cos(rotation), math.sin(rotation)
+
+		-- A superellipse: the exponent sweeps 8 (nearly the window's rectangle) down to 2 (a true ellipse).
+		local exponent = 8 - 6 * toCircle
+
+		for index, dot in dots do
+			local t = (index - 1) / MORPH_SEGMENTS * math.pi * 2
+			local cosT, sinT = math.cos(t), math.sin(t)
+
+			local outlineX = halfWidth * (cosT >= 0 and 1 or -1) * math.abs(cosT) ^ (2 / exponent)
+			local outlineY = halfHeight * (sinT >= 0 and 1 or -1) * math.abs(sinT) ^ (2 / exponent)
+
+			-- A circle that folds into a figure eight: only Y changes, so it is one blend.
+			local symbolX = circleRadius * cosT
+			local symbolY = circleRadius * sinT * (1 + toInfinity * (cosT - 1))
+
+			local x = (outlineX + (symbolX - outlineX) * toCircle) * scale
+			local y = (outlineY + (symbolY - outlineY) * toCircle) * scale
+			dot.Position = UDim2.fromOffset(centerX + x * cosR - y * sinR - origin.X, centerY + x * sinR + y * cosR - origin.Y)
+			dot.BackgroundTransparency = fade
+
+			-- A brighter head runs round the curve so the line reads as drawn.
+			local head = ((index / MORPH_SEGMENTS) + p * 1.7) % 1
+			local lit = head < 0.14 and (1 - head / 0.14) or 0
+			local size = dotSize * (1 + lit * 1.25) * (0.5 + 0.5 * scale)
+			dot.Size = UDim2.fromOffset(math.max(size, 1), math.max(size, 1))
+		end
+
+		if glow then
+			local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+			local cap = math.min(viewport.X, viewport.Y) * MORPH_GLOW_CAP
+			local glowWidth = math.min(rect.w * scale * 1.5, cap)
+			local glowHeight = math.min(rect.h * scale * 1.5, cap)
+			glow.Position = UDim2.fromOffset(centerX - origin.X, centerY - origin.Y)
+			glow.Size = UDim2.fromOffset(glowWidth, glowHeight)
+
+			-- Area times opacity is what the eye reads: the bigger the bloom, the fainter it is drawn.
+			local opacity = (1 - (0.8 + 0.2 * fade)) * math.clamp(MORPH_GLOW_REF / math.max(math.sqrt(glowWidth * glowHeight), 1), 0.3, 1)
+			glow.ImageTransparency = 1 - opacity
+		end
+	end)
+	active.morphConnection = connection
+
+	task.delay(MORPH_SECONDS, function()
+		if not active or active.morphToken ~= token then return end
+
+		connection:Disconnect()
+		active.morphConnection = nil
+		pcall(function() gui:Destroy() end)
+		active.morphGui = nil
+		onDone()
+	end)
+end
+
+---@return boolean
+function Window:IsOpen()
+	return active ~= nil and active.visible
+end
+
+-- Opening: the panel fades in while growing from 95% with a slight spring, its shadow fades in and grows, the game behind
+-- dims, the blur rises, and the page rows then fade in one by one.
+function Window:Show()
+	if active.visible then return end
+
+	active.visible = true
 	local blurWanted = HussUI.Flags.ui_blur == nil or HussUI.Flags.ui_blur.Value == true
-
 	local dim = HussUI.Flags.ui_scrim == nil or HussUI.Flags.ui_scrim.Value == true
 
-	if state then
-		-- Opening: the panel fades in while growing from 95% with a slight spring, its shadow fades in and grows, the game
-		-- behind dims, the blur rises, and the page rows then fade in one by one.
-		active.dockHidden = false
-		settleCascade()
-		active.root.Visible = true
-		active.pop.Scale = 0.95
-		active.main.GroupTransparency = 1
-		tween(active.pop, 0.5, { Scale = 1 }, Enum.EasingStyle.Back)
-		tween(active.main, 0.3, { GroupTransparency = 0 }, Enum.EasingStyle.Quad)
-		for _, layer in active.shadows do
-			layer.frame.BackgroundTransparency = 1
-			layer.frame.Size = UDim2.new(0.97, layer.spread * 2, 0.97, layer.spread * 2)
-			tween(layer.frame, 0.3, { BackgroundTransparency = layer.alpha }, Enum.EasingStyle.Quad)
-			tween(layer.frame, 0.5, { Size = UDim2.new(1, layer.spread * 2, 1, layer.spread * 2) })
-		end
-		tween(active.scrim, 0.3, { BackgroundTransparency = dim and 0.55 or 1 }, Enum.EasingStyle.Quad)
-		if blurWanted then tween(active.blur, 0.5, { Size = 12 }) end
-		if not quiet then active.sfx("open") end
-	else
-		settleCascade()
-		tween(active.pop, 0.2, { Scale = 0.97 }, QUINT, IN)
-		tween(active.main, 0.2, { GroupTransparency = 1 }, Enum.EasingStyle.Quad)
-		for _, layer in active.shadows do
-			tween(layer.frame, 0.2, { BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
-		end
-		tween(active.scrim, 0.25, { BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
-		tween(active.blur, 0.3, { Size = 0 })
-		if not quiet then active.sfx("close") end
-		task.delay(0.3, function()
-			if active and not active.visible and active.root.Parent then active.root.Visible = false end
-		end)
+	settleCascade()
+	active.root.Visible = true
+	active.pop.Scale = 0.95
+	active.main.GroupTransparency = 1
+	tween(active.pop, 0.5, { Scale = 1 }, Enum.EasingStyle.Back)
+	tween(active.main, 0.3, { GroupTransparency = 0 }, Enum.EasingStyle.Quad)
+	for _, layer in active.shadows do
+		layer.frame.BackgroundTransparency = 1
+		layer.frame.Size = UDim2.new(0.97, layer.spread * 2, 0.97, layer.spread * 2)
+		tween(layer.frame, 0.3, { BackgroundTransparency = layer.alpha }, Enum.EasingStyle.Quad)
+		tween(layer.frame, 0.5, { Size = UDim2.new(1, layer.spread * 2, 1, layer.spread * 2) })
 	end
-	if active.refreshDock then active.refreshDock() end
+	tween(active.scrim, 0.3, { BackgroundTransparency = dim and 0.55 or 1 }, Enum.EasingStyle.Quad)
+	if blurWanted then tween(active.blur, 0.5, { Size = 12 }) end
+	active.sfx("open")
 
 	-- The pill is placed from the layout, which may not have run while the window was hidden.
-	if state then
-		task.defer(function()
-			local owner = active and active.window
-			if not (owner and owner.current) then return end
+	task.defer(function()
+		local owner = active and active.window
+		if not (owner and owner.current) then return end
 
-			movePill(owner, owner.current, true)
-			cascadeIn(owner.current)
-		end)
+		movePill(owner, owner.current, true)
+		cascadeIn(owner.current)
+	end)
+end
+
+-- Closing: fade and shrink away. keepDock leaves the dock alone (the morph is about to bring it in).
+---@param keepDock boolean?
+function Window:Hide(keepDock)
+	if not active.visible then return end
+
+	active.visible = false
+	settleCascade()
+	tween(active.pop, 0.2, { Scale = 0.97 }, QUINT, IN)
+	tween(active.main, 0.2, { GroupTransparency = 1 }, Enum.EasingStyle.Quad)
+	for _, layer in active.shadows do
+		tween(layer.frame, 0.2, { BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
+	end
+	tween(active.scrim, 0.25, { BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
+	tween(active.blur, 0.3, { Size = 0 })
+	task.delay(0.3, function()
+		if active and not active.visible and active.root.Parent then active.root.Visible = false end
+	end)
+	if not keepDock then moveDock(false) end
+end
+
+-- Minimise: the panel goes at once; what the eye follows is the morph, and the dock appears as it lands.
+function Window:Minimise()
+	if not active.visible or active.morphBusy then return end
+
+	active.morphBusy = true
+	active.morphToken += 1
+	local token = active.morphToken
+
+	-- The pill is placed first and revealed last, so the morph has a real target to fly to.
+	active.dockShown = true
+	active.dock.Position = dockPosition(true)
+	setDockAlpha(0)
+
+	task.spawn(runMorph, function(p)
+		if active and active.morphToken == token then setDockAlpha(ramp(p, 0.78, 1)) end
+	end, function()
+		if active and active.morphToken == token then
+			setDockAlpha(1)
+			active.morphBusy = false
+		end
+	end)
+
+	active.sfx("close")
+	self:Hide(true)
+end
+
+-- Restore: anything still moving stops, the dock slides back out and the window opens.
+function Window:Restore()
+	cancelMorph()
+	setDockAlpha(1)
+	moveDock(false)
+	self:Show()
+end
+
+-- Programmatic open/close (the hub uses this around its start-up film): plain show and hide, no dock.
+---@param state boolean?
+function Window:Toggle(state)
+	if state == nil then state = not active.visible end
+
+	if state then
+		if not active.visible then self:Restore() end
+	else
+		self:Hide(false)
+	end
+end
+
+-- What the menu key does: bring the window back, or minimise it to the dock (or just hide it when the dock is off).
+function Window:Flip()
+	if not active.visible then
+		self:Restore()
+	elseif HussUI.Flags.ui_dock == nil or HussUI.Flags.ui_dock.Value then
+		self:Minimise()
+	else
+		self:Hide(false)
 	end
 end
 
@@ -1965,6 +2237,12 @@ function HussUI:CreateWindow(opts)
 		local span = showWidgets and (WINDOW_WIDTH + 2 * (WIDGET_GAP + WIDGET_WIDTH)) or WINDOW_WIDTH
 		local automatic = math.clamp(math.min(viewport.X / (span + 40), viewport.Y / (WINDOW_HEIGHT + 50)), 0.5, 1.6)
 		fit.Scale = math.clamp(automatic * active.scaleMultiplier, 0.4, 2)
+
+		-- The dock keeps the window's own proportions and stays where it should (shown or parked) when the size changes.
+		if active.dockScale then
+			active.dockScale.Scale = math.clamp(fit.Scale, 0.8, 1.6)
+			active.dock.Position = dockPosition(active.dockShown or active.morphBusy)
+		end
 	end
 	active.refit = refit
 	refit()
@@ -2026,13 +2304,12 @@ function HussUI:CreateWindow(opts)
 			create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(14, 1), Rotation = rotation, BorderSizePixel = 0, BackgroundColor3 = COLORS.muted }, button)
 		end
 	end, function()
-		active.dockHidden = true
-		window:Toggle(false)
+		window:Hide(false)
 	end)
 	chromeButton(-50, function(button)
 		create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(13, 1), BorderSizePixel = 0, BackgroundColor3 = COLORS.muted }, button)
 	end, function()
-		window:Toggle(false)
+		window:Minimise()
 	end)
 
 	-- Ping pill: a status dot and the live round-trip time.
@@ -2110,24 +2387,36 @@ function HussUI:CreateWindow(opts)
 	active.toastHost = create("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -20, 1, -20), Size = UDim2.fromOffset(340, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 }, gui)
 	create("UIListLayout", { Padding = UDim.new(0, 8), VerticalAlignment = Enum.VerticalAlignment.Bottom, SortOrder = Enum.SortOrder.LayoutOrder }, active.toastHost)
 
-	-- Dock: a small pill that stands in for the window while it is hidden (the reference's "Minimise" action). Click to restore.
-	local dock = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Size = UDim2.fromOffset(132, 32), BackgroundColor3 = COLORS.card, BackgroundTransparency = 0.12, BorderSizePixel = 0, Visible = false }, gui)
+	-- Dock: the pill the window minimises into, parked above the screen until it is needed. Its halo breathes, the monogram has
+	-- a halo of its own, hovering lights the edge and swells the glow, clicking brings the window back.
+	local dock = create("TextButton", { Name = "Dock", Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(0.5, 0), Size = UDim2.fromOffset(DOCK_WIDTH, DOCK_HEIGHT), BackgroundColor3 = COLORS.overlay, BorderSizePixel = 0 }, gui)
+	active.dock = dock
+	active.dockScale = create("UIScale", { Scale = 1 }, dock)
 	corner(dock, 999)
-	stroke(dock, 0.45, 1, COLORS.line)
-	label(dock, string.upper(tostring(opts.Title or "Hub")), 15, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(16, 0), Size = UDim2.new(1, -32, 1, 0), TextXAlignment = Enum.TextXAlignment.Center })
+	active.dockStroke = stroke(dock, 0.3, 1, COLORS.lineStrong)
+	active.dockStrokeBase = 0.3
+	active.dockAlpha, active.dockTime, active.dockShown, active.dockHovered = 1, 0, false, false
+	active.morphToken, active.morphBusy = 0, false
+	active.dockGlow = create("ImageLabel", { Name = "DockGlow", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.new(1, 74, 1, 58), BackgroundTransparency = 1, ImageColor3 = COLORS.accent, ImageTransparency = 1, ZIndex = 0 }, dock)
+	active.orbGlow = create("ImageLabel", { Name = "OrbGlow", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromOffset(22, 18), Size = UDim2.fromOffset(46, 46), BackgroundTransparency = 1, ImageColor3 = COLORS.accent, ImageTransparency = 1, ZIndex = 1 }, dock)
+	active.dockMark = label(dock, "H", 20, COLORS.text, DISPLAY, { Position = UDim2.fromOffset(10, 6), Size = UDim2.fromOffset(24, 24), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 2 })
+	active.dockLabel = label(dock, string.upper(tostring(opts.Title or "Hub")), 12, COLORS.dim, STRONG, { Position = UDim2.fromOffset(38, 0), Size = UDim2.new(1, -48, 1, 0), ZIndex = 2, TextTruncate = Enum.TextTruncate.AtEnd })
 	track(dock.MouseEnter:Connect(function()
-		tween(dock, 0.2, { BackgroundTransparency = 0 })
+		active.dockHovered, active.dockStrokeBase = true, 0.05
+		tween(active.dockStroke, 0.18, { Color = COLORS.accent, Transparency = 1 - 0.95 * active.dockAlpha })
+		tween(active.dockLabel, 0.18, { TextColor3 = COLORS.text })
+		tween(active.dockGlow, 0.3, { Size = UDim2.new(1, 104, 1, 80) })
 	end))
 	track(dock.MouseLeave:Connect(function()
-		tween(dock, 0.25, { BackgroundTransparency = 0.12 })
+		active.dockHovered, active.dockStrokeBase = false, 0.3
+		tween(active.dockStroke, 0.18, { Color = COLORS.lineStrong, Transparency = 1 - 0.7 * active.dockAlpha })
+		tween(active.dockLabel, 0.18, { TextColor3 = COLORS.dim })
+		tween(active.dockGlow, 0.3, { Size = UDim2.new(1, 74, 1, 58) })
 	end))
 	track(dock.Activated:Connect(function()
-		window:Toggle(true)
+		window:Restore()
 	end))
-	active.refreshDock = function()
-		local wanted = HussUI.Flags.ui_dock == nil or HussUI.Flags.ui_dock.Value == true
-		dock.Visible = wanted and not active.visible and not active.dockHidden
-	end
+	dock.Position = dockPosition(false)
 
 	-- Keybind list: a small draggable panel that stays on screen while the menu is closed. It lists every enabled
 	-- feature with its key (and the disabled ones too when "List disabled features too" is on).
@@ -2211,7 +2500,7 @@ function HussUI:CreateWindow(opts)
 	track(userInputService.InputBegan:Connect(function(input)
 		if active.capturing or input.KeyCode ~= window.toggleKey or userInputService:GetFocusedTextBox() then return end
 
-		window:Toggle()
+		window:Flip()
 	end))
 
 	-- Live refresh: stat cards, widgets, ping, shimmer and the animated icons.
@@ -2223,6 +2512,7 @@ function HussUI:CreateWindow(opts)
 	track(runService.Heartbeat:Connect(function(deltaTime)
 		fps = fps + ((1 / math.max(deltaTime, 1e-3)) - fps) * math.min(1, deltaTime * 4)
 		stepIcons(deltaTime)
+		stepDock(deltaTime)
 		if not active.visible then return end
 
 		shimmerClock = shimmerClock + deltaTime
@@ -2328,14 +2618,11 @@ function HussUI:CreateWindow(opts)
 		end,
 	})
 	settings:AddToggle({
-		Text = "Dock: keep a small button on screen while the window is hidden (click it to bring the window back)",
+		Text = "Minimise to the button at the top: the menu key shrinks the window into it (off: the menu key just hides the window)",
 		Default = true,
 		Flag = "ui_dock",
 		NoList = true,
 		Bind = false,
-		Callback = function()
-			active.refreshDock()
-		end,
 	})
 	settings:AddSlider({
 		Text = "Interface size (100% fits your screen the way the reference does)",
@@ -2444,7 +2731,7 @@ function HussUI:Destroy()
 		pcall(function() connection:Disconnect() end)
 	end
 
-	for _, instance in { owner.gui, owner.introGui, owner.blur } do
+	for _, instance in { owner.gui, owner.introGui, owner.blur, owner.morphGui } do
 		if instance then pcall(function() instance:Destroy() end) end
 	end
 
