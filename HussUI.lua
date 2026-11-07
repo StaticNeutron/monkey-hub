@@ -1450,6 +1450,89 @@ local function movePill(window, tab, immediate)
 	end
 end
 
+-- Page rows fade in one after another when a page opens (the reference's cascade). Every transparency a row draws is noted,
+-- set to invisible, then brought back in turn: first row at once, then one every STEP seconds, capped so a long page does not
+-- take long. A new cascade (or the window closing) puts everything back at once.
+local CASCADE_STEP = 0.045
+local CASCADE_CAP = 0.34
+local CASCADE_ROWS = 12
+local CASCADE_PROPERTIES = { "BackgroundTransparency", "TextTransparency", "ImageTransparency", "Transparency" }
+
+---@param object Instance
+---@param into table
+local function noteDrawn(object, into)
+	for _, property in CASCADE_PROPERTIES do
+		local ok, value = pcall(function()
+			return object[property]
+		end)
+		if ok and type(value) == "number" and value < 1 and (property ~= "Transparency" or object:IsA("UIStroke")) then
+			table.insert(into, { object, property, value })
+		end
+	end
+end
+
+local function settleCascade()
+	local running = active and active.cascade
+	if not running then return end
+
+	active.cascade = nil
+	for _, part in running.parts do
+		if part[1].Parent then
+			pcall(function()
+				part[1][part[2]] = part[3]
+			end)
+		end
+	end
+end
+
+---@param tab table
+local function cascadeIn(tab)
+	if not active or HussUI.Flags.ui_animate and not HussUI.Flags.ui_animate.Value then return end
+
+	settleCascade()
+
+	local rows = {}
+	for _, child in tab.list:GetChildren() do
+		if child:IsA("GuiObject") then table.insert(rows, child) end
+	end
+	table.sort(rows, function(first, second)
+		return first.LayoutOrder < second.LayoutOrder
+	end)
+
+	local running = { parts = {} }
+	local groups = {}
+	for index, row in rows do
+		if index > CASCADE_ROWS then break end
+
+		local group = {}
+		noteDrawn(row, group)
+		for _, descendant in row:GetDescendants() do
+			noteDrawn(descendant, group)
+		end
+		groups[index] = group
+		for _, part in group do
+			table.insert(running.parts, part)
+			part[1][part[2]] = 1
+		end
+	end
+	active.cascade = running
+
+	for index, group in groups do
+		task.delay(math.min((index - 1) * CASCADE_STEP, CASCADE_CAP), function()
+			if not active or active.cascade ~= running then return end
+
+			for _, part in group do
+				if part[1].Parent then tween(part[1], 0.3, { [part[2]] = part[3] }) end
+			end
+		end)
+	end
+
+	-- Whatever is left when it is over is put back exactly.
+	task.delay(CASCADE_CAP + (CASCADE_ROWS * 0) + 0.45, function()
+		if active and active.cascade == running then settleCascade() end
+	end)
+end
+
 ---@param tab table
 local function selectTab(tab)
 	local window = tab.window
@@ -1483,6 +1566,7 @@ local function selectTab(tab)
 	end
 	movePill(window, tab, previous == nil)
 	if previous then active.sfx("tab") end
+	if previous or active.visible then task.defer(cascadeIn, tab) end
 
 	-- The page heading fades in again for every tab.
 	window.pageTitle.Text = tab.name
@@ -1684,18 +1768,35 @@ function Window:Toggle(state, quiet)
 	active.visible = state
 	local blurWanted = HussUI.Flags.ui_blur == nil or HussUI.Flags.ui_blur.Value == true
 
+	local dim = HussUI.Flags.ui_scrim == nil or HussUI.Flags.ui_scrim.Value == true
+
 	if state then
+		-- Opening: the panel fades in while growing from 95% with a slight spring, its shadow fades in and grows, the game
+		-- behind dims, the blur rises, and the page rows then fade in one by one.
 		active.dockHidden = false
+		settleCascade()
 		active.root.Visible = true
-		active.pop.Scale = 0.97
-		tween(active.pop, 0.35, { Scale = 1 }, QUINT)
-		active.cover.BackgroundTransparency = 0.2
-		tween(active.cover, 0.45, { BackgroundTransparency = 1 })
-		if blurWanted then tween(active.blur, 0.4, { Size = 12 }) end
+		active.pop.Scale = 0.95
+		active.main.GroupTransparency = 1
+		tween(active.pop, 0.5, { Scale = 1 }, Enum.EasingStyle.Back)
+		tween(active.main, 0.3, { GroupTransparency = 0 }, Enum.EasingStyle.Quad)
+		for _, layer in active.shadows do
+			layer.frame.BackgroundTransparency = 1
+			layer.frame.Size = UDim2.new(0.97, layer.spread * 2, 0.97, layer.spread * 2)
+			tween(layer.frame, 0.3, { BackgroundTransparency = layer.alpha }, Enum.EasingStyle.Quad)
+			tween(layer.frame, 0.5, { Size = UDim2.new(1, layer.spread * 2, 1, layer.spread * 2) })
+		end
+		tween(active.scrim, 0.3, { BackgroundTransparency = dim and 0.55 or 1 }, Enum.EasingStyle.Quad)
+		if blurWanted then tween(active.blur, 0.5, { Size = 12 }) end
 		if not quiet then active.sfx("open") end
 	else
+		settleCascade()
 		tween(active.pop, 0.2, { Scale = 0.97 }, QUINT, IN)
-		tween(active.cover, 0.25, { BackgroundTransparency = 0.2 })
+		tween(active.main, 0.2, { GroupTransparency = 1 }, Enum.EasingStyle.Quad)
+		for _, layer in active.shadows do
+			tween(layer.frame, 0.2, { BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
+		end
+		tween(active.scrim, 0.25, { BackgroundTransparency = 1 }, Enum.EasingStyle.Quad)
 		tween(active.blur, 0.3, { Size = 0 })
 		if not quiet then active.sfx("close") end
 		task.delay(0.3, function()
@@ -1708,7 +1809,10 @@ function Window:Toggle(state, quiet)
 	if state then
 		task.defer(function()
 			local owner = active and active.window
-			if owner and owner.current then movePill(owner, owner.current, true) end
+			if not (owner and owner.current) then return end
+
+			movePill(owner, owner.current, true)
+			cascadeIn(owner.current)
 		end)
 	end
 end
@@ -1846,6 +1950,9 @@ function HussUI:CreateWindow(opts)
 	active.blur = create("BlurEffect", { Name = BLUR_NAME, Size = 0 }, lightingService)
 	ensureAssets()
 
+	-- Dims the game behind the window while it is open (clicks pass straight through it).
+	active.scrim = create("Frame", { Name = "Scrim", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 0, Active = false }, gui)
+
 	local root = create("Frame", { Name = "Root", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(WINDOW_WIDTH, WINDOW_HEIGHT), BackgroundTransparency = 1, Visible = false }, gui)
 	active.root = root
 	local fit = create("UIScale", {}, root)
@@ -1867,13 +1974,16 @@ function HussUI:CreateWindow(opts)
 	active.pop = create("UIScale", { Scale = 1 }, body)
 
 	-- Drop shadow: two soft layers behind the panel.
+	active.shadows = {}
 	for _, layer in { { spread = 10, alpha = 0.86 }, { spread = 26, alpha = 0.93 } } do
 		local shadow = create("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 8), Size = UDim2.new(1, layer.spread * 2, 1, layer.spread * 2), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = layer.alpha, BorderSizePixel = 0, ZIndex = 0 }, body)
 		corner(shadow, 12 + layer.spread)
+		table.insert(active.shadows, { frame = shadow, spread = layer.spread, alpha = layer.alpha })
 	end
 
 	-- Main panel: one near-black plane with a hairline edge.
-	local main = create("Frame", { Name = "Main", Size = UDim2.fromOffset(WINDOW_WIDTH, WINDOW_HEIGHT), BackgroundColor3 = COLORS.bg, BackgroundTransparency = 0, BorderSizePixel = 0, ClipsDescendants = true }, body)
+	local main = create("CanvasGroup", { Name = "Main", Size = UDim2.fromOffset(WINDOW_WIDTH, WINDOW_HEIGHT), BackgroundColor3 = COLORS.bg, BackgroundTransparency = 0, BorderSizePixel = 0, GroupTransparency = 1 }, body)
+	active.main = main
 	corner(main, 12)
 	stroke(main, 0.3, 1, COLORS.lineStrong)
 	window.main = main
@@ -1991,8 +2101,6 @@ function HussUI:CreateWindow(opts)
 	window.pages = create("Frame", { Position = UDim2.fromOffset(contentLeft, HEADER_HEIGHT + 96), Size = UDim2.new(1, -(contentLeft + PAGE_PADDING - 12), 1, -(HEADER_HEIGHT + 96 + 10)), BackgroundTransparency = 1, ClipsDescendants = true }, main)
 
 	-- Cover used for the open/close fade.
-	active.cover = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = COLORS.bg, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 30, Active = false }, main)
-	corner(active.cover, 12)
 
 	-- Floating widgets beside the window.
 	active.widgetHost = create("Frame", { Position = UDim2.fromOffset(WINDOW_WIDTH + WIDGET_GAP, 0), Size = UDim2.fromOffset(WIDGET_WIDTH, WINDOW_HEIGHT), BackgroundTransparency = 1, Visible = showWidgets }, body)
@@ -2240,6 +2348,23 @@ function HussUI:CreateWindow(opts)
 		Callback = function(value)
 			active.scaleMultiplier = value / 100
 			active.refit()
+		end,
+	})
+	settings:AddToggle({
+		Text = "Opening animation: the page rows fade in one by one when a page opens",
+		Default = true,
+		Flag = "ui_animate",
+		NoList = true,
+		Bind = false,
+	})
+	settings:AddToggle({
+		Text = "Dim the game behind the window while it is open",
+		Default = true,
+		Flag = "ui_scrim",
+		NoList = true,
+		Bind = false,
+		Callback = function(on)
+			if active.visible then tween(active.scrim, 0.3, { BackgroundTransparency = on and 0.55 or 1 }) end
 		end,
 	})
 	settings:AddToggle({
