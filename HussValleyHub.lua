@@ -3015,6 +3015,17 @@ local function buildUi()
 				edits.savePrefs()
 			end,
 		})
+		editsTab:AddToggle({
+			Text = "Flash on cuts and beats: a quick white flash on every cut and bass hit of an edit",
+			Default = edits.prefs.flash,
+			Flag = "editFlash",
+			NoList = true,
+			Bind = false,
+			Callback = function(on)
+				edits.prefs.flash = on
+				edits.savePrefs()
+			end,
+		})
 		local volumeToken = 0
 		editsTab:AddSlider({
 			Text = "Edit volume",

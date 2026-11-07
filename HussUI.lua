@@ -2241,6 +2241,12 @@ function Window:OpenFilm(step)
 	filmButton("Close", "X", UDim2.new(1, -56, 0, 12), UDim2.fromOffset(32, 28), function()
 		self:CloseFilm()
 	end)
+	local flashButton
+	flashButton = filmButton("Flash", Edits.prefs.flash and "Flash: on" or "Flash: off", UDim2.new(1, -176, 0, 12), UDim2.fromOffset(100, 28), function()
+		Edits.prefs.flash = not Edits.prefs.flash
+		Edits.savePrefs()
+		flashButton.Text = Edits.prefs.flash and "Flash: on" or "Flash: off"
+	end)
 
 	-- Volume: 0 to 200%.
 	label(root, "VOLUME", 10, COLORS.text, MONO, { Position = UDim2.fromOffset(330, bottom + 23), Size = UDim2.fromOffset(82, 30) })

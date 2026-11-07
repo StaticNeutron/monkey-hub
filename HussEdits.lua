@@ -18,7 +18,8 @@ local BASE_URL = "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/mai
 local FOLDER = "HussValley/edits"
 local PREFS_FILE = "HussValley/edits.json"
 local CHUNK_BYTES = 1048576
-local PREFETCH_PAGES = 4
+-- Seconds of film kept loaded ahead of the picture (in pages: more pages when a page holds fewer frames).
+local PREFETCH_SECONDS = 0.7
 local BLACK = Color3.fromRGB(3, 3, 3)
 local IVORY = Color3.fromRGB(236, 232, 222)
 local DIM = Color3.fromRGB(152, 149, 139)
@@ -31,7 +32,7 @@ local userInputService = game:GetService("UserInputService")
 local tweenService = game:GetService("TweenService")
 
 -- State.
-Edits.prefs = { play = true, pick = "Random", volume = 0.8 }
+Edits.prefs = { play = true, pick = "Random", volume = 0.8, flash = true }
 Edits.manifest = nil
 local installing = {}
 local thumbAsset = nil
@@ -80,6 +81,7 @@ function Edits.loadPrefs()
 
 	if type(data.play) == "boolean" then Edits.prefs.play = data.play end
 	if type(data.pick) == "string" then Edits.prefs.pick = data.pick end
+	if type(data.flash) == "boolean" then Edits.prefs.flash = data.flash end
 	if type(data.volume) == "number" then Edits.prefs.volume = math.clamp(data.volume, 0, 2) end
 	return Edits.prefs
 end
@@ -309,6 +311,9 @@ function Edits.newPlayer(parent, edit, opts)
 	}, Player)
 
 	self.perPage = edit.cols * edit.rows
+	self.ahead = math.ceil(PREFETCH_SECONDS * edit.fps / self.perPage) + 2
+	self.flashes = edit.flashes or {}
+	self.flashIndex = 1
 	self.root = Instance.new("Frame")
 	self.root.Name = opts.name or "HussFilm"
 	self.root.Size = opts.Size or UDim2.fromScale(1, 1)
@@ -330,6 +335,16 @@ function Edits.newPlayer(parent, edit, opts)
 	self.view.ImageRectSize = Vector2.new(edit.tileW - 2, edit.tileH - 2)
 	self.view.ZIndex = self.root.ZIndex
 	self.view.Parent = self.root
+
+	-- White overlay for the flashes on cuts and beats.
+	self.flash = Instance.new("Frame")
+	self.flash.Name = "FlashOverlay"
+	self.flash.Size = UDim2.fromScale(1, 1)
+	self.flash.BackgroundColor3 = Color3.new(1, 1, 1)
+	self.flash.BackgroundTransparency = 1
+	self.flash.BorderSizePixel = 0
+	self.flash.ZIndex = self.root.ZIndex + 2
+	self.flash.Parent = self.root
 
 	-- Pages about to be shown are loaded here first (nearly invisible, one pixel) so the swap never waits on a decode.
 	self.decode = Instance.new("Frame")
@@ -380,7 +395,7 @@ end
 -- Keeps the next few pages loading (and drops the ones left behind).
 ---@param page number
 function Player:prefetch(page)
-	for index = page, math.min(page + PREFETCH_PAGES, self.edit.pages) do
+	for index = page, math.min(page + self.ahead, self.edit.pages) do
 		if not self.labels[index] then
 			local id = self:idFor(index)
 			if id then
@@ -417,7 +432,13 @@ function Player:prepare(timeout)
 	local deadline = os.clock() + (timeout or 4)
 	while not self.dead and os.clock() < deadline do
 		self:prefetch(1)
-		if self:loaded(1) and (self.edit.pages < 2 or self:loaded(2)) then
+
+		-- The first few pages must be ready, so the start does not stutter.
+		local ready = true
+		for index = 1, math.min(3, self.edit.pages) do
+			if not self:loaded(index) then ready = false end
+		end
+		if ready then
 			self:show(0)
 			return true
 		end
@@ -446,15 +467,48 @@ function Player:show(frame)
 	return true
 end
 
+-- One flash: the overlay jumps to its brightest and fades out. Cuts hit hard, beats are lighter.
+---@param strength number
+---@param kind string
+function Player:pulse(strength, kind)
+	local peak = (kind == "cut" and 0.6 or 0.4) * math.clamp(strength, 0, 1)
+	self.flash.BackgroundTransparency = 1 - peak
+	tweenService:Create(self.flash, TweenInfo.new(kind == "cut" and 0.28 or 0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = 1 }):Play()
+end
+
+-- Fires every flash the clock has just passed (not ones skipped by a seek).
+function Player:checkFlashes()
+	if not self.playing or self.buffering then return end
+
+	local list = self.flashes
+	while self.flashIndex <= #list and list[self.flashIndex][1] <= self.time do
+		local entry = list[self.flashIndex]
+		self.flashIndex += 1
+		if Edits.prefs.flash and self.time - entry[1] < 0.12 then self:pulse(entry[2], entry[3]) end
+	end
+end
+
+-- Points the flash list at the first flash that has not happened yet at this time.
+---@param time number
+function Player:resetFlashes(time)
+	local index = 1
+	while index <= #self.flashes and self.flashes[index][1] < time do
+		index += 1
+	end
+	self.flashIndex = index
+end
+
 ---@param deltaTime number
 function Player:step(deltaTime)
 	if self.dead then return end
 
 	local edit = self.edit
 	if self.playing and not self.buffering then
+		-- The sound is the clock while it plays; before it starts and after it ends (the picture can be longer than the
+		-- audio) the clock just keeps running.
 		if self.sound and self.sound.IsPlaying then
 			self.time = self.sound.TimePosition
-		elseif not self.sound then
+		else
 			self.time += deltaTime
 		end
 	end
@@ -462,6 +516,7 @@ function Player:step(deltaTime)
 	if self.playing and self.time >= edit.duration - 0.02 then
 		if self.loop then
 			self:seek(0)
+			if self.sound then self.sound:Play() end
 		else
 			self.playing, self.ended = false, true
 			if self.sound then self.sound:Pause() end
@@ -470,6 +525,8 @@ function Player:step(deltaTime)
 		end
 		return
 	end
+
+	self:checkFlashes()
 
 	local frame = math.clamp(math.floor(self.time * edit.fps), 0, edit.frames - 1)
 	local shown = self:show(frame)
@@ -493,11 +550,21 @@ function Player:play()
 	self.playing, self.ended = true, false
 	if self.sound then
 		self.sound.Volume = self.volume
-		self.sound:Play()
+
+		-- Continue exactly where the film stopped: the position is set before the sound resumes, because starting a paused
+		-- sound with Play() can begin it again from zero.
+		self.sound.TimePosition = self.time
+		if self.sound.IsPaused then
+			self.sound:Resume()
+		else
+			self.sound:Play()
+		end
 	end
 end
 
 function Player:pause()
+	if self.sound and self.sound.IsPlaying and not self.buffering then self.time = self.sound.TimePosition end
+
 	self.playing = false
 	if self.sound then self.sound:Pause() end
 end
@@ -506,6 +573,7 @@ end
 function Player:seek(seconds)
 	seconds = math.clamp(seconds, 0, self.edit.duration)
 	self.time, self.ended = seconds, false
+	self:resetFlashes(seconds)
 	if self.sound then self.sound.TimePosition = seconds end
 end
 
