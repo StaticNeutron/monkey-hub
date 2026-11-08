@@ -21,7 +21,7 @@ local WINDOW_WIDTH = 880
 local WINDOW_HEIGHT = 556
 local HEADER_HEIGHT = 90
 local SIDEBAR_WIDTH = 204
-local TAB_HEIGHT = 44
+local TAB_HEIGHT = 46
 local PAGE_PADDING = 24
 local ROW_HEIGHT = 52
 local RADIUS = 6
@@ -75,6 +75,7 @@ local coreGuiService = game:GetService("CoreGui")
 local httpService = game:GetService("HttpService")
 local statsService = game:GetService("Stats")
 local textService = game:GetService("TextService")
+local guiService = game:GetService("GuiService")
 
 local localPlayer = playersService.LocalPlayer
 
@@ -269,7 +270,7 @@ end
 
 local ASSET_BASE = "https://raw.githubusercontent.com/StaticNeutron/monkey-hub/main/assets/"
 local ASSET_FOLDER = "HussValley/assets"
-local ASSET_MARKER = ASSET_FOLDER .. "/hv_ready_r2"
+local ASSET_MARKER = ASSET_FOLDER .. "/hv_ready_r3"
 local assetIds = {}
 local assetsState = "idle"
 
@@ -432,6 +433,335 @@ local function squish(scale)
 	tween(scale, 0.2, { Scale = 1 }, QUINT)
 end
 
+-- Giorgio's control feel (Lumen A.interactive) ---------------------------------------------------------------------------
+-- Every control carries a fill that rises from its floor, a specular sweep that crosses it once on enter, a pool of light that
+-- follows the cursor, a rim-lit edge whose bright arc faces the pointer, a bloom, and (free-standing buttons) a small press dip.
+-- The layers are built on the first hover, so a hundred idle rows cost nothing. One RenderStepped drives the followed light.
+
+local Fx = { hover = nil }
+local SPOT_REST = 0.74
+local SPOT_TAU = 0.018
+local SPOT_MAX_LAG = 14
+
+---@return number
+function Fx.scale()
+	local fit = active and active.fit and active.fit.Scale or 1
+	local pop = active and active.pop and active.pop.Scale or 1
+	return math.max(fit * pop, 0.01)
+end
+
+-- The cursor in the frame's own (pre-UIScale) offsets. GetMouseLocation includes the top bar, AbsolutePosition does not.
+---@param frame GuiObject
+---@return Vector2
+function Fx.pointerIn(frame)
+	local success, point = pcall(function()
+		return userInputService:GetMouseLocation() - guiService:GetGuiInset()
+	end)
+	if not success then return Vector2.zero end
+	return (point - frame.AbsolutePosition) / Fx.scale()
+end
+
+-- Puts the light under the pointer (first frame of a hover snaps, later frames lag by about 18 ms) and turns the rim to face it.
+---@param hover table
+---@param deltaTime number?
+function Fx.aim(hover, deltaTime)
+	local frame, spot = hover.frame, hover.spot
+	if not (frame.Parent and spot.Parent) then
+		if Fx.hover == hover then Fx.hover = nil end
+		return
+	end
+
+	local scale = Fx.scale()
+	local absolute = frame.AbsoluteSize
+	local width, height = absolute.X / scale, absolute.Y / scale
+	local glowHeight = math.clamp(height * 1.25, 26, 84)
+	local glowWidth = math.clamp(glowHeight * 1.9, 40, 150)
+	spot.Size = UDim2.fromOffset(math.floor(glowWidth), math.floor(glowHeight))
+
+	local point = Fx.pointerIn(frame)
+	local x, y = point.X, point.Y
+	if deltaTime and hover.sx then
+		local blend = 1 - math.exp(-deltaTime / SPOT_TAU)
+		local nextX, nextY = hover.sx + (x - hover.sx) * blend, hover.sy + (y - hover.sy) * blend
+		if (x - nextX) ^ 2 + (y - nextY) ^ 2 > SPOT_MAX_LAG * SPOT_MAX_LAG then nextX, nextY = x, y end
+		hover.sx, hover.sy = nextX, nextY
+		x, y = nextX, nextY
+	else
+		hover.sx, hover.sy = x, y
+	end
+	spot.Position = UDim2.fromOffset(x, y)
+
+	if hover.rim then
+		local offsetX, offsetY = x - width / 2, y - height / 2
+		if offsetX * offsetX + offsetY * offsetY > 4 then hover.rim.Rotation = math.deg(math.atan2(offsetY, offsetX)) - 180 end
+	end
+end
+
+---@param frame GuiObject
+---@param opts table? radius, hover / press (resting transparencies of the fill), layer (colour), dip, spot (false), onState
+---@return table
+function Fx.light(frame, opts)
+	opts = opts or {}
+	local radius = opts.radius or RADIUS
+	local hoverAlpha, pressAlpha = opts.hover or 0.88, opts.press or 0.8
+	local state = { hovered = false, pressed = false }
+	local built, layers = false, {}
+
+	local function apply()
+		if not built then return end
+
+		local live = state.hovered or state.pressed
+		layers.fill.BackgroundTransparency = state.pressed and pressAlpha or (state.hovered and hoverAlpha or 1)
+		layers.edge.Transparency = state.pressed and 0.2 or (state.hovered and 0.68 or 1)
+		layers.rim.Offset = Vector2.new(0, state.pressed and 0.12 or 0)
+		if layers.spot then
+			tween(layers.spot, 0.19, { ImageTransparency = state.pressed and math.max(0, SPOT_REST - 0.2) or (state.hovered and SPOT_REST or 1) })
+		end
+		if layers.bloom then
+			tween(layers.bloom, 0.19, { ImageTransparency = state.pressed and 0.68 or (live and 0.82 or 1) })
+		end
+		if layers.dip then tween(layers.dip, 0.19, { Scale = state.pressed and 0.978 or 1 }) end
+		if opts.onState then opts.onState(state) end
+	end
+
+	-- The pool of light and the bloom need the glow image, which arrives with the asset pack: they join on a later hover.
+	local function addGlow()
+		if layers.spot or opts.spot == false then return end
+		local glow = assetId("images/glow.png")
+		if not glow then return end
+
+		local z = frame.ZIndex
+		local host = create("CanvasGroup", { Name = "SpotHost", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = z + 2 }, frame)
+		corner(host, radius)
+		layers.spot = create("ImageLabel", { Name = "Spot", AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(150, 60), BackgroundTransparency = 1, Image = glow, ImageColor3 = opts.spotColor or COLORS.accent, ImageTransparency = 1, ZIndex = z + 2 }, host)
+		layers.bloom = create("ImageLabel", { Name = "Bloom", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromScale(1.34, 1.25), BackgroundTransparency = 1, Image = glow, ImageColor3 = opts.spotColor or COLORS.accent, ImageTransparency = 1, ZIndex = math.max(1, z - 1) }, frame)
+	end
+
+	local function build()
+		built = true
+		local z = frame.ZIndex
+
+		layers.fill = create("Frame", { Name = "State", Size = UDim2.fromScale(1, 1), BackgroundColor3 = opts.layer or Color3.new(1, 1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = z + 4 }, frame)
+		corner(layers.fill, radius)
+		create("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.34, 0.92), NumberSequenceKeypoint.new(0.72, 0.42), NumberSequenceKeypoint.new(1, 0.1) }) }, layers.fill)
+
+		local sweep = create("Frame", { Name = "Sweep", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = z + 3 }, frame)
+		corner(sweep, radius)
+		layers.sweep = create("UIGradient", { Rotation = 16, Offset = Vector2.new(-1.2, 0), Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.4, 1), NumberSequenceKeypoint.new(0.5, 0.88), NumberSequenceKeypoint.new(0.6, 1), NumberSequenceKeypoint.new(1, 1) }) }, sweep)
+
+		layers.edge = create("UIStroke", { Name = "Edge", Color = COLORS.accent, Thickness = 1.4, Transparency = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, frame)
+		layers.rim = create("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.3, 0.35), NumberSequenceKeypoint.new(1, 0.85) }) }, layers.edge)
+
+		-- A row inside a list is positioned by the list and already squishes on click; only free-standing buttons dip.
+		if opts.dip and not frame:FindFirstChildOfClass("UIScale") then
+			layers.dip = create("UIScale", { Scale = 1 }, frame)
+		end
+		addGlow()
+	end
+
+	track(frame.MouseEnter:Connect(function()
+		state.hovered = true
+		if not built then build() end
+		addGlow()
+
+		-- Fired on enter only, never held.
+		layers.sweep.Offset = Vector2.new(-1.2, 0)
+		tween(layers.sweep, 0.62, { Offset = Vector2.new(1.2, 0) })
+		if layers.spot then
+			local entry = { frame = frame, spot = layers.spot, rim = layers.rim }
+			Fx.aim(entry)
+			Fx.hover = entry
+		end
+		apply()
+	end))
+	track(frame.MouseLeave:Connect(function()
+		state.hovered, state.pressed = false, false
+		if layers.spot and Fx.hover and Fx.hover.spot == layers.spot then Fx.hover = nil end
+		apply()
+	end))
+	track(frame.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			state.pressed = true
+			apply()
+		end
+	end))
+	track(frame.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			state.pressed = false
+			apply()
+		end
+	end))
+
+	return state
+end
+
+-- Giorgio's backdrop: the pinstripe film (200 frames, 25 fps) under the whole panel at 13% strength, with a tiled film grain.
+-- The frames come as 1024 px atlas pages (6 tiles each, pre-cropped to the panel) from assets/bg.pack, downloaded once on
+-- their own thread; until they are on disk the panel is simply the dark surface.
+
+local BG_REV = 1
+local BG_MARKER = ASSET_FOLDER .. "/hv_bg_ready_r" .. BG_REV
+local BG_INDEX = ASSET_FOLDER .. "/hv_bg_index.json"
+local BG_REST = 0.87
+local Backdrop = { state = "idle", index = nil, ids = {}, labels = {}, clock = 0, shownPage = 0, fade = false }
+
+function Backdrop.ensure()
+	if Backdrop.state ~= "idle" then return end
+	Backdrop.state = "loading"
+
+	task.spawn(function()
+		pcall(setthreadidentity, 8)
+		local success = pcall(function()
+			if not isfile(BG_MARKER) then
+				local index = httpService:JSONDecode(request({ Url = ASSET_BASE .. "bg.json?t=" .. os.time(), Method = "GET" }).Body)
+				assert(index.rev == BG_REV, "background revision")
+
+				local chunks, received = {}, 0
+				while received < index.packSize do
+					local last = math.min(received + 1048576, index.packSize) - 1
+					local reply
+					for _ = 1, 3 do
+						local requested, answer = pcall(request, { Url = ASSET_BASE .. "bg.pack", Method = "GET", Headers = { Range = string.format("bytes=%d-%d", received, last) } })
+						if requested and type(answer) == "table" and answer.Success and type(answer.Body) == "string" then
+							reply = answer
+							break
+						end
+						task.wait(0.5)
+					end
+					assert(reply, "background download interrupted")
+
+					-- A server that ignores Range answers with the whole file at once.
+					if reply.StatusCode == 200 and #reply.Body == index.packSize then
+						chunks, received = { reply.Body }, index.packSize
+					else
+						table.insert(chunks, reply.Body)
+						received += #reply.Body
+					end
+					task.wait()
+				end
+
+				local data = table.concat(chunks)
+				assert(#data == index.packSize, "background incomplete")
+
+				local built = ""
+				for part in string.gmatch(ASSET_FOLDER, "[^/]+") do
+					built = built == "" and part or (built .. "/" .. part)
+					if not isfolder(built) then makefolder(built) end
+				end
+
+				local cursor = 0
+				for page, size in index.pageSizes do
+					local bytes = string.sub(data, cursor + 1, cursor + size)
+					assert(string.byte(bytes, 1) == 0xFF and string.byte(bytes, 2) == 0xD8, "background damaged")
+					writefile(string.format("%s/hv_bg_r%d_p%04d.jpg", ASSET_FOLDER, BG_REV, page), bytes)
+					cursor += size
+					if page % 8 == 0 then task.wait() end
+				end
+				writefile(BG_INDEX, httpService:JSONEncode(index))
+				writefile(BG_MARKER, "1")
+			end
+
+			Backdrop.index = httpService:JSONDecode(readfile(BG_INDEX))
+		end)
+		Backdrop.state = (success and Backdrop.index) and "ready" or "failed"
+	end)
+end
+
+---@param page number
+---@return string?
+function Backdrop.idFor(page)
+	if Backdrop.ids[page] then return Backdrop.ids[page] end
+
+	local success, id = pcall(getcustomasset, string.format("%s/hv_bg_r%d_p%04d.jpg", ASSET_FOLDER, BG_REV, page))
+	if success and type(id) == "string" and id ~= "" then
+		Backdrop.ids[page] = id
+		return id
+	end
+	return nil
+end
+
+-- Pages about to be shown load in a one-pixel, nearly invisible label first so the swap never waits on a decode.
+---@param page number
+function Backdrop.prefetch(page)
+	local index = Backdrop.index
+	local wanted = {}
+	for step = 0, 3 do
+		wanted[(page - 1 + step) % #index.pageSizes + 1] = true
+	end
+
+	for number in wanted do
+		if not Backdrop.labels[number] then
+			local id = Backdrop.idFor(number)
+			if id then
+				Backdrop.labels[number] = create("ImageLabel", { Size = UDim2.fromOffset(1, 1), BackgroundTransparency = 1, ImageTransparency = 0.999999, Image = id }, Backdrop.decode)
+			end
+		end
+	end
+	for number, item in Backdrop.labels do
+		if not wanted[number] then
+			item:Destroy()
+			Backdrop.labels[number] = nil
+		end
+	end
+end
+
+-- Builds the film layer inside the panel (called while the window is built).
+---@param main Instance
+function Backdrop.attach(main)
+	Backdrop.labels, Backdrop.clock, Backdrop.shownPage, Backdrop.fade = {}, 0, 0, false
+	Backdrop.view = create("ImageLabel", { Name = "PinstripeFilm", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ImageTransparency = 1, ScaleType = Enum.ScaleType.Stretch, ZIndex = 1, Visible = false }, main)
+	Backdrop.grain = create("ImageLabel", { Name = "Grain", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ImageTransparency = 0.955, ScaleType = Enum.ScaleType.Tile, TileSize = UDim2.fromOffset(128, 128), ZIndex = 1, Visible = false }, main)
+	Backdrop.decode = create("Frame", { Name = "Decode", Size = UDim2.fromOffset(1, 1), BackgroundTransparency = 1, ClipsDescendants = true }, main)
+	Backdrop.ensure()
+end
+
+-- Per frame: late-bound grain, then the film (it only runs while the window is open, and the pages are paged in ahead).
+---@param deltaTime number
+function Backdrop.step(deltaTime)
+	if not (active and Backdrop.view and Backdrop.view.Parent) then return end
+
+	if Backdrop.grain.Image == "" and assetsState == "ready" then
+		local id = assetId("images/grain.png")
+		if id then
+			Backdrop.grain.Image = id
+			Backdrop.grain.Visible = true
+		end
+	end
+
+	local index = Backdrop.index
+	if Backdrop.state ~= "ready" or not index then return end
+	local filmFlag = HussUI.Flags.ui_film
+	if filmFlag and not filmFlag.Value then
+		Backdrop.view.Visible = false
+		return
+	end
+	if not active.visible then return end
+
+	local perPage = index.cols * index.rows
+	if active.visible then Backdrop.clock += deltaTime end
+	local frame = math.floor(Backdrop.clock * index.fps) % index.frames
+	local page = frame // perPage + 1
+	Backdrop.prefetch(page)
+
+	-- Wait for a page that has not decoded yet (the picture holds its last frame).
+	if page ~= Backdrop.shownPage then
+		local label = Backdrop.labels[page]
+		if not (label and label.IsLoaded) then return end
+		Backdrop.view.Image = Backdrop.ids[page]
+		Backdrop.shownPage = page
+	end
+
+	local slot = frame % perPage
+	Backdrop.view.ImageRectSize = Vector2.new(index.tileW - 2, index.tileH - 2)
+	Backdrop.view.ImageRectOffset = Vector2.new((slot % index.cols) * index.tileW + 1, (slot // index.cols) * index.tileH + 1)
+	Backdrop.view.Visible = true
+
+	if not Backdrop.fade then
+		Backdrop.fade = true
+		tween(Backdrop.view, 1.2, { ImageTransparency = BG_REST }, Enum.EasingStyle.Sine)
+	end
+end
+
 -- Rows -------------------------------------------------------------------------------------------------------------------
 -- One column of full-width rows (the reference's layout): a tracked section label, then 52 px raised rows with a hairline
 -- edge. Long text wraps and the row grows to fit.
@@ -455,8 +785,9 @@ end
 ---@param tab table
 ---@param height number
 ---@param clickable boolean
+---@param light table? hover / press for Fx.light (buttons are quieter than rows)
 ---@return Instance, UIScale
-local function newRow(tab, height, clickable)
+local function newRow(tab, height, clickable, light)
 	tab.order = tab.order + 1
 
 	local props = {
@@ -475,12 +806,10 @@ local function newRow(tab, height, clickable)
 	stroke(row, 0.5, 1, COLORS.line)
 	local scale = create("UIScale", { Scale = 1 }, row)
 
-	track(row.MouseEnter:Connect(function()
-		tween(row, 0.2, { BackgroundColor3 = COLORS.overlay })
-	end))
-	track(row.MouseLeave:Connect(function()
-		tween(row, 0.25, { BackgroundColor3 = COLORS.card })
-	end))
+	-- A one-pixel highlight along the top edge: the whole elevation cue (the reference's sheen).
+	create("Frame", { Name = "Sheen", Position = UDim2.fromOffset(RADIUS, 0), Size = UDim2.new(1, -RADIUS * 2, 0, 1), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.92, BorderSizePixel = 0, ZIndex = 2 }, row)
+
+	Fx.light(row, light or { radius = RADIUS })
 
 	return row, scale
 end
@@ -522,7 +851,7 @@ end
 
 ---@param opts table
 function Tab:AddButton(opts)
-	local row, scale = newRow(self, 38, true)
+	local row, scale = newRow(self, 38, true, { radius = RADIUS, hover = 0.95, press = 0.9 })
 	label(row, opts.Text, 13, COLORS.text, STRONG, {
 		Size = UDim2.fromScale(1, 1),
 		TextXAlignment = Enum.TextXAlignment.Center,
@@ -1416,12 +1745,9 @@ Window.__index = Window
 ---@param name string
 function Window:CreateCategory(name)
 	self.order = self.order + 1
-	label(self.navList, spaced(name), 9, COLORS.faint, BOLD, {
-		Size = UDim2.new(1, 0, 0, 30),
-		LayoutOrder = self.order,
-		TextYAlignment = Enum.TextYAlignment.Bottom,
-		Position = UDim2.fromOffset(10, 0),
-	}).Name = "Category"
+	-- The reference's nav section: a 26 px strip with the tracked label at (12, 12).
+	local holder = create("Frame", { Name = "Category", Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = self.order }, self.navList)
+	label(holder, spaced(name), 9, COLORS.faint, BOLD, { Position = UDim2.fromOffset(12, 12), Size = UDim2.new(1, -14, 0, 12) })
 end
 
 -- Whether a tab is on screen right now.
@@ -1542,9 +1868,13 @@ local function selectTab(tab)
 	local previous = window.current
 	window.current = tab
 
+	-- Pages travel in the direction of the nav: going down the list the old page leaves upward and the new one rises from below.
+	local direction = (table.find(window.tabs, tab) or 0) >= (previous and table.find(window.tabs, previous) or 0) and 1 or -1
+
 	if previous then
 		previous.group.Visible = true
 		tween(previous.group, 0.18, { GroupTransparency = 1 })
+		tween(previous.group, 0.36, { Position = UDim2.fromOffset(0, -24 * direction) })
 		tween(previous.title, 0.25, { TextColor3 = COLORS.muted })
 		tween(previous.glyph, 0.25, { ImageColor3 = COLORS.muted })
 		if previous.animated then tween(previous.animated.image, 0.25, { ImageColor3 = COLORS.muted }) end
@@ -1555,9 +1885,9 @@ local function selectTab(tab)
 
 	tab.group.Visible = true
 	tab.group.GroupTransparency = 1
-	tab.group.Position = UDim2.fromOffset(0, 24)
+	tab.group.Position = UDim2.fromOffset(0, 42 * direction)
 	tab.scale.Scale = 0.985
-	tween(tab.group, 0.5, { GroupTransparency = 0, Position = UDim2.fromOffset(0, 0) })
+	tween(tab.group, 0.62, { GroupTransparency = 0, Position = UDim2.fromOffset(0, 0) })
 	tween(tab.scale, 0.5, { Scale = 1 })
 	tween(tab.title, 0.25, { TextColor3 = COLORS.text })
 	tween(tab.glyph, 0.25, { ImageColor3 = COLORS.text })
@@ -1592,7 +1922,10 @@ local function makeTab(window, name, iconName, order)
 
 	local glyphImage = icon(iconName)
 	tab.glyph = create("ImageLabel", { Image = glyphImage, ImageColor3 = COLORS.muted, BackgroundTransparency = 1, Size = UDim2.fromOffset(20, 20), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), Visible = glyphImage ~= "" }, button)
-	tab.title = label(button, name, 14, COLORS.muted, BODY, { Position = UDim2.fromOffset(46, 0), Size = UDim2.new(1, -86, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd })
+	tab.title = label(button, name, 14, COLORS.muted, BODY, { Position = UDim2.fromOffset(48, 0), Size = UDim2.new(1, -88, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd })
+
+	-- The number key that selects the tab, stated in the nav (the reference does the same).
+	tab.number = label(button, "", 10, COLORS.faint, MONO, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(20, 12), TextXAlignment = Enum.TextXAlignment.Right })
 
 	-- The animated line icon from the reference. It appears once the asset pack is on disk and replaces the still glyph.
 	local animatedName = TAB_ICONS[name]
@@ -1602,7 +1935,7 @@ local function makeTab(window, name, iconName, order)
 	end
 
 	-- Count of switched-on toggles, set in mono at the right.
-	local badge = create("TextLabel", { Text = "0", Font = MONO, TextSize = 10, TextColor3 = COLORS.accent2, BackgroundTransparency = 1, Visible = false, Size = UDim2.fromOffset(24, 16), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), TextXAlignment = Enum.TextXAlignment.Right }, button)
+	local badge = create("TextLabel", { Text = "0", Font = MONO, TextSize = 10, TextColor3 = COLORS.accent2, BackgroundTransparency = 1, Visible = false, Size = UDim2.fromOffset(24, 16), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -38, 0.5, 0), TextXAlignment = Enum.TextXAlignment.Right }, button)
 	tab.refreshBadge = function()
 		badge.Visible = tab.enabled > 0
 		badge.Text = string.format("%02d", tab.enabled)
@@ -1622,19 +1955,24 @@ local function makeTab(window, name, iconName, order)
 	create("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, tab.list)
 	create("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingLeft = UDim.new(0, 1), PaddingBottom = UDim.new(0, 14), PaddingRight = UDim.new(0, 12) }, tab.list)
 
+	-- Nav tabs take the quiet end of the hover system (the reference: hover 0.97, press 0.95).
+	Fx.light(button, { radius = RADIUS, hover = 0.97, press = 0.95 })
 	track(button.MouseEnter:Connect(function()
-		if window.current ~= tab then tween(button, 0.2, { BackgroundTransparency = 0.95 }) end
 		if tab.animated then tab.animated:play() end
 		active.sfx("hover")
-	end))
-	track(button.MouseLeave:Connect(function()
-		tween(button, 0.25, { BackgroundTransparency = 1 })
 	end))
 	track(button.Activated:Connect(function()
 		selectTab(tab)
 	end))
 
 	table.insert(window.tabs, tab)
+
+	-- Numbers follow the order the nav shows (Settings is built first but listed last).
+	local ordered = {}
+	for _, item in window.tabs do table.insert(ordered, item) end
+	table.sort(ordered, function(a, b) return a.button.LayoutOrder < b.button.LayoutOrder end)
+	window.navOrder = ordered
+	for position, item in ordered do item.number.Text = tostring(position) end
 	return tab
 end
 
@@ -2521,6 +2859,7 @@ function HussUI:CreateWindow(opts)
 	local root = create("Frame", { Name = "Root", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(WINDOW_WIDTH, WINDOW_HEIGHT), BackgroundTransparency = 1, Visible = false }, gui)
 	active.root = root
 	local fit = create("UIScale", {}, root)
+	active.fit = fit
 	local function refit()
 		local camera = workspace.CurrentCamera
 		if not camera then return end
@@ -2544,6 +2883,14 @@ function HussUI:CreateWindow(opts)
 	local body = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, root)
 	active.pop = create("UIScale", { Scale = 1 }, body)
 
+	-- One follower drives the pool of light under whichever control the pointer is on.
+	Fx.hover = nil
+	track(runService.RenderStepped:Connect(function(deltaTime)
+		local hover = Fx.hover
+		if hover then Fx.aim(hover, deltaTime) end
+		Backdrop.step(deltaTime)
+	end))
+
 	-- Drop shadow: two soft layers behind the panel.
 	active.shadows = {}
 	for _, layer in { { spread = 10, alpha = 0.86 }, { spread = 26, alpha = 0.93 } } do
@@ -2559,18 +2906,13 @@ function HussUI:CreateWindow(opts)
 	stroke(main, 0.3, 1, COLORS.lineStrong)
 	window.main = main
 
-	-- Light bleeding from the top edge.
-	local wash = create("Frame", { Size = UDim2.new(1, 0, 0, 260), BackgroundColor3 = COLORS.accent, BorderSizePixel = 0 }, main)
-	create("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.94), NumberSequenceKeypoint.new(1, 1) }), Rotation = 90 }, wash)
-
-	-- Pinstripe field (a suit-cloth nod to the reference's striped film background) with a slow sheen crossing it.
-	local stripes = create("Frame", { Name = "Pinstripe", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, main)
-	for x = SIDEBAR_WIDTH + 14, WINDOW_WIDTH, 24 do
-		create("Frame", { Position = UDim2.fromOffset(x, HEADER_HEIGHT), Size = UDim2.new(0, 1, 1, -HEADER_HEIGHT), BackgroundColor3 = COLORS.row, BackgroundTransparency = 0.975, BorderSizePixel = 0 }, stripes)
+	-- The reference's backdrop: its pinstripe film under everything (the wash is hidden there, so there is none here), the
+	-- film grain over it, and two hairlines that dissolve at the ends (white on the top edge, ivory one pixel below it).
+	Backdrop.attach(main)
+	for _, line in { { color = Color3.new(1, 1, 1), y = 0, alpha = 0.5 }, { color = COLORS.accent, y = 1, alpha = 0.25 } } do
+		local hairline = create("Frame", { Name = "Hairline", Position = UDim2.fromOffset(0, line.y), Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = line.color, BorderSizePixel = 0, ZIndex = 6 }, main)
+		create("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, line.alpha), NumberSequenceKeypoint.new(1, 1) }) }, hairline)
 	end
-	local sheen = create("Frame", { Position = UDim2.fromOffset(-300, HEADER_HEIGHT), Size = UDim2.new(0, 300, 1, -HEADER_HEIGHT), BackgroundColor3 = COLORS.row, BorderSizePixel = 0 }, stripes)
-	create("UIGradient", { Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.955), NumberSequenceKeypoint.new(1, 1) }) }, sheen)
-	tweenService:Create(sheen, TweenInfo.new(12, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1), { Position = UDim2.fromOffset(WINDOW_WIDTH, HEADER_HEIGHT) }):Play()
 
 	-- Header: wordmark, edition line, the film shortcut, key hint, ping, minimise, close. It is also the drag handle.
 	local header = create("Frame", { Name = "Header", Size = UDim2.new(1, 0, 0, HEADER_HEIGHT), BackgroundTransparency = 1, Active = true }, main)
@@ -2582,14 +2924,9 @@ function HussUI:CreateWindow(opts)
 	-- 30 px chrome buttons at the right edge.
 	local function chromeButton(offset, draw, callback)
 		local button = create("TextButton", { Text = "", AutoButtonColor = false, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, offset, 0.5, 0), Size = UDim2.fromOffset(30, 30), BackgroundColor3 = COLORS.hover, BackgroundTransparency = 1, BorderSizePixel = 0 }, header)
-		corner(button, 9)
+		corner(button, 6)
 		draw(button)
-		track(button.MouseEnter:Connect(function()
-			tween(button, 0.2, { BackgroundTransparency = 0.2 })
-		end))
-		track(button.MouseLeave:Connect(function()
-			tween(button, 0.25, { BackgroundTransparency = 1 })
-		end))
+		Fx.light(button, { radius = 6, hover = 0.9, press = 0.82, dip = true })
 		track(button.Activated:Connect(callback))
 	end
 	chromeButton(-16, function(button)
@@ -2793,6 +3130,22 @@ function HussUI:CreateWindow(opts)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
 	end))
 
+	-- Number keys pick a tab, only while the pointer is over the window (1 to 5 are the game's own hotbar).
+	local NUMBER_KEYS = { Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three, Enum.KeyCode.Four, Enum.KeyCode.Five, Enum.KeyCode.Six, Enum.KeyCode.Seven, Enum.KeyCode.Eight, Enum.KeyCode.Nine }
+	track(userInputService.InputBegan:Connect(function(input, processed)
+		if processed or not active.visible or active.capturing or userInputService:GetFocusedTextBox() then return end
+
+		local number = table.find(NUMBER_KEYS, input.KeyCode)
+		local tab = number and window.navOrder and window.navOrder[number]
+		if not tab then return end
+
+		local pointer = userInputService:GetMouseLocation() - guiService:GetGuiInset()
+		local origin, size = active.main.AbsolutePosition, active.main.AbsoluteSize
+		if pointer.X >= origin.X and pointer.X <= origin.X + size.X and pointer.Y >= origin.Y and pointer.Y <= origin.Y + size.Y then
+			selectTab(tab)
+		end
+	end))
+
 	-- Menu key.
 	track(userInputService.InputBegan:Connect(function(input)
 		if active.capturing or input.KeyCode ~= window.toggleKey or userInputService:GetFocusedTextBox() then return end
@@ -2938,6 +3291,13 @@ function HussUI:CreateWindow(opts)
 		Text = "Opening animation: the page rows fade in one by one when a page opens",
 		Default = true,
 		Flag = "ui_animate",
+		NoList = true,
+		Bind = false,
+	})
+	settings:AddToggle({
+		Text = "Animated pinstripe background (the reference's film)",
+		Default = true,
+		Flag = "ui_film",
 		NoList = true,
 		Bind = false,
 	})
